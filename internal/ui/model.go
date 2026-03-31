@@ -19,9 +19,11 @@ import (
 type sessionState int
 
 const (
-	stateList         sessionState = iota // 通常のリスト選択モード
-	stateInput                            // ターゲット入力モード
-	stateAutoComplete                     // コンフィグ検索、補完モード
+	stateList          sessionState = iota // 通常のリスト選択モード
+	stateInput                             // ターゲット入力モード
+	stateAutoComplete                      // コンフィグ検索、補完モード
+	stateEditLineList                      // ファイル内の行を選ぶモード
+	stateEditLineValue                     // 選んだ行の値を書き換えるモード
 )
 
 // --- モデルの定義 ---
@@ -37,6 +39,12 @@ type Model struct {
 	errMsg             string
 	filteredFiles      []string
 	autoCompleteCursor int
+
+	// インライン編集用のデータ
+	editLines      []string
+	editCursor     int
+	editFile       string
+	editLinePrefix string
 }
 
 func New(files []string) Model {
@@ -102,6 +110,76 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// --- 編集する行を上下キーで選ぶ処理 ---
+		if m.state == stateEditLineList {
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateList
+				m.updateFilteredFiles()
+				return m, nil
+			case "up", "k":
+				if m.editCursor > 0 {
+					m.editCursor--
+				}
+				return m, nil
+			case "down", "j":
+				if m.editCursor < len(m.editLines)-1 {
+					m.editCursor++
+				}
+				return m, nil
+			case "enter":
+				// 選んだ行を":"で左右に分割
+				line := m.editLines[m.editCursor]
+				parts := strings.SplitN(line, ":", 2)
+
+				if len(parts) == 2 {
+					// 編集モードに入る前処理
+					m.editLinePrefix = parts[0] + ":"
+					currentVal := strings.TrimSpace(parts[1])
+
+					m.textInput.SetValue(currentVal)
+					m.textInput.Placeholder = "新しい値を入力..."
+					m.textInput.Focus()
+					m.state = stateEditLineValue
+					m.errMsg = ""
+				} else {
+					m.errMsg = "この行は編集できません（'キー: 値' の形式ではありません）"
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// --- 値をテキストボックスで書き換えて保存する処理 ---
+		if m.state == stateEditLineValue {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.state = stateEditLineList
+				m.textInput.Blur()
+				return m, nil
+			case tea.KeyEnter:
+				newVal := m.textInput.Value()
+				m.editLines[m.editCursor] = m.editLinePrefix + " " + newVal
+
+				newContent := strings.Join(m.editLines, "\n")
+				err := os.WriteFile(m.editFile, []byte(newContent), 0644)
+
+				if err != nil {
+					m.errMsg = "保存エラー: " + err.Error()
+				} else {
+					m.errMsg = "✨ 値を更新しました"
+				}
+
+				m.state = stateEditLineList
+				m.textInput.Blur()
+				return m, nil
+			}
+
+			// 文字入力の反映
+			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+		}
+
 		// --- オートコンプリートモードの処理 ---
 		if m.state == stateAutoComplete {
 			switch msg.String() {
@@ -194,6 +272,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autoCompleteCursor = 0
 			m.errMsg = ""
 			return m, textinput.Blink
+		case "e":
+			if len(m.files) > 0 {
+				selectedFile := m.files[m.cursor]
+				contentBytes, err := os.ReadFile(selectedFile)
+				if err == nil {
+					// ファイルを行ごとに分割してメモリに保持
+					cleanContent := strings.ReplaceAll(string(contentBytes), "\r\n", "\n")
+					m.editLines = strings.Split(cleanContent, "\n")
+					m.editCursor = 0
+					m.editFile = selectedFile
+					m.state = stateEditLineList
+					m.errMsg = ""
+				} else {
+					m.errMsg = "読み込みエラー: " + err.Error()
+				}
+			}
+			return m, nil
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -283,12 +378,35 @@ func (m Model) View() string {
 	leftPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(listStr)
 
 	// 右ペイン：プレビュー
-	var selectedFile string
-	if len(m.files) > 0 {
-		selectedFile = m.files[m.cursor]
+	var rightPaneContent string
+
+	if m.state == stateEditLineList || m.state == stateEditLineValue {
+		var sb strings.Builder
+		sb.WriteString(titleStyle.Render("✏️ Inline Edit: "+filepath.Base(m.editFile)) + "\n\n")
+
+		for i, line := range m.editLines {
+			if i == m.editCursor {
+				if m.state == stateEditLineValue {
+					sb.WriteString(selectedItemStyle.Render(">> "+m.editLinePrefix+" ") + m.textInput.View() + "\n")
+				} else {
+					sb.WriteString(selectedItemStyle.Render(">  "+line) + "\n")
+				}
+			} else {
+				sb.WriteString("   " + line + "\n")
+			}
+		}
+		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 行選択, Enter: 編集/保存, Esc: 終了)"))
+		rightPaneContent = sb.String()
+	} else {
+		var selectedFile string
+		if len(m.files) > 0 {
+			selectedFile = m.files[m.cursor]
+		}
+		previewTitle := titleStyle.Render("📄 Preview: "+filepath.Base(selectedFile)) + "\n"
+		rightPaneContent = previewTitle + m.viewport.View()
 	}
-	previewTitle := titleStyle.Render("📄 Preview: "+filepath.Base(selectedFile)) + "\n"
-	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(previewTitle + m.viewport.View())
+
+	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(rightPaneContent)
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 }
