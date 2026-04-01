@@ -51,6 +51,9 @@ type Model struct {
 	editFile        string
 	editLinePrefix  string
 	editLineComment string
+
+	// Modelの履歴
+	history History
 }
 
 func New(files []string) Model {
@@ -59,12 +62,15 @@ func New(files []string) Model {
 	ti.CharLimit = 156
 	ti.Width = 40
 
-	return Model{
+	m := Model{
 		files:     files,
 		allFiles:  files,
 		textInput: ti,
 		state:     stateList,
 	}
+
+	m.history.Save(m, nil, nil) // 初期状態を保存
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -190,11 +196,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Blur()
 				return m, nil
 			case tea.KeyEnter:
+				oldContent, _ := os.ReadFile(m.editFile)
 				newVal := m.textInput.Value()
 				comment := strings.TrimSpace(strings.ReplaceAll(m.editLineComment, "# 必須項目", ""))
 				m.editLines[m.editCursor] = strings.TrimSpace(m.editLinePrefix + " " + newVal + " " + comment)
 
 				newContent := strings.Join(m.editLines, "\n")
+				capturedFile := m.editFile
+				capturedOld := oldContent
+				capturedNew := []byte(newContent)
+				m.history.Save(m,
+					func() error { return os.WriteFile(capturedFile, capturedOld, 0644) },
+					func() error { return os.WriteFile(capturedFile, capturedNew, 0644) },
+				)
 				err := os.WriteFile(m.editFile, []byte(newContent), 0644)
 
 				if err != nil {
@@ -271,6 +285,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						// 成功したらファイルを保存してリストを再読み込み
 						savePath := filepath.Join("conf", "model", "generated.yaml")
+						oldContent, readErr := os.ReadFile(savePath)
+						capturedPath := savePath
+						capturedNew := []byte(yamlContent)
+						var undoAction func() error
+						if readErr == nil {
+							capturedOld := oldContent
+							undoAction = func() error { return os.WriteFile(capturedPath, capturedOld, 0644) }
+						} else {
+							undoAction = func() error { return os.Remove(capturedPath) }
+						}
+						m.history.Save(m,
+							undoAction,
+							func() error { return os.WriteFile(capturedPath, capturedNew, 0644) },
+						)
 						os.WriteFile(savePath, []byte(yamlContent), 0644)
 
 						// ファイルをリストを最新の状態に更新、マスターリストにも同期
@@ -313,8 +341,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// ファイルのコピー処理
 						inputBytes, err := os.ReadFile(sourceFile)
 						if err == nil {
+							capturedDest := destFile
+							capturedContent := inputBytes
 							err = os.WriteFile(destFile, inputBytes, 0644)
 							if err == nil {
+								m.history.Save(m,
+									func() error { return os.Remove(capturedDest) },
+									func() error { return os.WriteFile(capturedDest, capturedContent, 0644) },
+								)
 								m.errMsg = "✨ 複製しました: " + destFile
 								m.files, _ = config.LoadYamlFiles("conf")
 								m.allFiles = m.files
@@ -340,6 +374,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y":
 				targetFile := m.files[m.cursor]
+				backup, _ := os.ReadFile(targetFile)
+				capturedFile := targetFile
+				capturedBackup := backup
+				m.history.Save(m,
+					func() error { return os.WriteFile(capturedFile, capturedBackup, 0644) },
+					func() error { return os.Remove(capturedFile) },
+				)
 				if err := os.Remove(targetFile); err != nil {
 					m.errMsg = "削除エラー: " + err.Error()
 				} else {
@@ -419,6 +460,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "u":
+			if snap, ok, err := m.history.Undo(); ok {
+				if err != nil {
+					m.errMsg = "Undoエラー: " + err.Error()
+				} else {
+					m.files, _ = config.LoadYamlFiles("conf")
+					m.allFiles = m.files
+					m.cursor = snap.cursor
+					if m.cursor >= len(m.files) {
+						m.cursor = max(0, len(m.files)-1)
+					}
+					cmd := m.updateViewportContent()
+					cmds = append(cmds, cmd)
+				}
+			}
+		case "r":
+			if snap, ok, err := m.history.Redo(); ok {
+				if err != nil {
+					m.errMsg = "Redoエラー: " + err.Error()
+				} else {
+					m.files, _ = config.LoadYamlFiles("conf")
+					m.allFiles = m.files
+					m.cursor = snap.cursor
+					if m.cursor >= len(m.files) {
+						m.cursor = max(0, len(m.files)-1)
+					}
+					cmd := m.updateViewportContent()
+					cmds = append(cmds, cmd)
+				}
+			}
 		case "n": // 'n'キーで新規作成（入力モード）へ移行
 			m.state = stateInput
 			m.textInput.SetValue("src.models.vae.MotionVAE") // テスト用初期値
