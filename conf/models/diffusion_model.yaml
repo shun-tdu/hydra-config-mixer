@@ -1,0 +1,5 @@
+_target_: models.diffusion.DiffusionModel
+num_timesteps: 1000 # type: int
+beta_start: 0.0001 # type: float
+beta_end: 0.02 # type: float
+hidden_dim: 512 # type: int

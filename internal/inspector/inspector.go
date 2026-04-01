@@ -3,6 +3,7 @@
 package inspector
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+//go:embed inspect_helper.py
+var inspectHelperScript []byte
 
 // Pythonの関数/クラスの引数情報を表す
 type Param struct {
@@ -35,7 +39,18 @@ type TargetCheckMsg struct {
 
 // 指定されたPathの.pyを読み込み、クラスのイニシャライザからyamlを生成する
 func GenerateYamlFromTarget(target string) (string, error) {
-	cmd := exec.Command("python", "inspect_helper.py", target)
+	tmp, err := os.CreateTemp("", "inspect_helper_*.py")
+	if err != nil {
+		return "", fmt.Errorf("一時ファイルの作成に失敗: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(inspectHelperScript); err != nil {
+		tmp.Close()
+		return "", fmt.Errorf("一時ファイルへの書き込みに失敗: %v", err)
+	}
+	tmp.Close()
+
+	cmd := exec.Command("python", tmp.Name(), target)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("Pythonの実行に失敗: %v\n%s", err, string(out))

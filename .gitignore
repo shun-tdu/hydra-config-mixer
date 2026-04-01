@@ -1,0 +1,16 @@
+# ビルド成果物
+hydra-config-mixer
+hydra-config-mixer.exe
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# テスト・カバレッジ
+*.test
+*.out

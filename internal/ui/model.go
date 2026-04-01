@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"hydra-config-mixer/internal/config"
 	"hydra-config-mixer/internal/inspector"
@@ -14,6 +15,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// SrcDir はYAML生成時にPythonファイルを検索するルートディレクトリ（main.goから上書き可能）
+var SrcDir = "models"
+
+// ConfDir はHydraのconfigディレクトリ（main.goから上書き可能）
+var ConfDir = "conf"
 
 // アプリケーションの状態管理
 type sessionState int
@@ -27,6 +34,9 @@ const (
 	stateClone                             // コンフィグを複製するモード
 	stateSearchFiles                       // ファイルの絞り込み検索モード
 	stateDeleteConfirm                     // 削除確認モード
+	statePyFileSearch                      // Pythonファイルを選んでYAMLを生成するモード
+	statePyClassSelect                     // Pythonファイル内のクラスを選ぶモード
+	stateSavePath                          // 生成YAMLの保存先を確認・編集するモード
 )
 
 // --- モデルの定義 ---
@@ -52,11 +62,25 @@ type Model struct {
 	editLinePrefix  string
 	editLineComment string
 
+	// Pythonファイル選択用のデータ
+	pyFiles          []string
+	pyFileCursor     int
+	pyClasses        []string
+	pyClassCursor    int
+	selectedPyModule string
+
+	// YAML生成・保存用のデータ
+	generatedYaml string
+	pendingTarget string
+
+	// ディレクトリ設定
+	confDir string
+
 	// Modelの履歴
 	history History
 }
 
-func New(files []string) Model {
+func New(files []string, confDir string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "例: src.models.YourModel"
 	ti.CharLimit = 156
@@ -67,6 +91,7 @@ func New(files []string) Model {
 		allFiles:  files,
 		textInput: ti,
 		state:     stateList,
+		confDir:   confDir,
 	}
 
 	m.history.Save(m, nil, nil) // 初期状態を保存
@@ -95,6 +120,47 @@ func (m *Model) updateViewportContent() tea.Cmd {
 	m.viewport.GotoTop()
 
 	return inspector.CheckTargetCmd(selectedFile)
+}
+
+// toSnakeCase はCamelCaseの文字列をsnake_caseに変換する。
+// "TransformerEncoder" → "transformer_encoder"
+// "MotionVAE" → "motion_vae"
+func toSnakeCase(s string) string {
+	runes := []rune(s)
+	var result []rune
+	for i, r := range runes {
+		if i == 0 {
+			result = append(result, unicode.ToLower(r))
+			continue
+		}
+		prev := runes[i-1]
+		isUpper := unicode.IsUpper(r)
+		prevIsLower := unicode.IsLower(prev)
+		nextIsLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+		if isUpper && (prevIsLower || nextIsLower) {
+			result = append(result, '_')
+		}
+		result = append(result, unicode.ToLower(r))
+	}
+	return string(result)
+}
+
+// moduleToSavePath はPythonのモジュールパスからHydraのconfig保存先を計算する。
+// "models.transformer.TransformerEncoder" → "<confDir>/models/transformer_encoder.yaml"
+// "models.blocks.resnet.ResNetLayer"      → "<confDir>/models/blocks/resnet_layer.yaml"
+func moduleToSavePath(target string, confDir string) string {
+	parts := strings.Split(target, ".")
+	if len(parts) < 2 {
+		return filepath.Join(confDir, toSnakeCase(target)+".yaml")
+	}
+	className := toSnakeCase(parts[len(parts)-1])
+	// モジュールパス（クラス名とモジュールファイル名を除いた部分）をディレクトリにする
+	var dirParts []string
+	if len(parts) >= 3 {
+		dirParts = parts[:len(parts)-2]
+	}
+	dir := filepath.Join(append([]string{confDir}, dirParts...)...)
+	return filepath.Join(dir, className+".yaml")
 }
 
 func (m *Model) updateViewportHeight() {
@@ -272,45 +338,161 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// --- PythonファイルからYAMLを生成するモードの処理 ---
+		if m.state == statePyFileSearch {
+			switch msg.String() {
+			case "esc":
+				m.state = stateList
+				m.textInput.Blur()
+				return m, nil
+			case "enter":
+				if len(m.filteredFiles) > 0 {
+					selected := m.filteredFiles[m.pyFileCursor]
+					filePath := strings.ReplaceAll(selected, ".", string(filepath.Separator)) + ".py"
+					classes := config.LoadPyClasses(filePath)
+
+					switch len(classes) {
+					case 0:
+						// クラスが見つからなければモジュールパスのまま入力モードへ
+						m.state = stateInput
+						m.textInput.SetValue(selected)
+						m.textInput.Placeholder = "クラスパスを確認・編集してEnterで生成"
+						m.textInput.Focus()
+					case 1:
+						// クラスが1つならそのまま補完して入力モードへ
+						m.state = stateInput
+						m.textInput.SetValue(selected + "." + classes[0])
+						m.textInput.Placeholder = "クラスパスを確認・編集してEnterで生成"
+						m.textInput.Focus()
+					default:
+						// クラスが複数ならクラス選択モードへ
+						m.selectedPyModule = selected
+						m.pyClasses = classes
+						m.pyClassCursor = 0
+						m.state = statePyClassSelect
+					}
+				}
+				return m, nil
+			case "up", "k":
+				if m.pyFileCursor > 0 {
+					m.pyFileCursor--
+				}
+				return m, nil
+			case "down", "j":
+				if m.pyFileCursor < len(m.filteredFiles)-1 {
+					m.pyFileCursor++
+				}
+				return m, nil
+			}
+
+			oldVal := m.textInput.Value()
+			m.textInput, cmd = m.textInput.Update(msg)
+			if m.textInput.Value() != oldVal {
+				query := strings.ToLower(m.textInput.Value())
+				m.filteredFiles = []string{}
+				for _, f := range m.pyFiles {
+					if strings.Contains(strings.ToLower(f), query) {
+						m.filteredFiles = append(m.filteredFiles, f)
+					}
+				}
+				m.pyFileCursor = 0
+			}
+			return m, cmd
+		}
+
+		// --- Pythonクラス選択モードの処理 ---
+		if m.state == statePyClassSelect {
+			switch msg.String() {
+			case "esc":
+				m.state = statePyFileSearch
+				return m, nil
+			case "enter":
+				if len(m.pyClasses) > 0 {
+					fullPath := m.selectedPyModule + "." + m.pyClasses[m.pyClassCursor]
+					m.state = stateInput
+					m.textInput.SetValue(fullPath)
+					m.textInput.Placeholder = "クラスパスを確認・編集してEnterで生成"
+					m.textInput.Focus()
+				}
+				return m, nil
+			case "up", "k":
+				if m.pyClassCursor > 0 {
+					m.pyClassCursor--
+				}
+				return m, nil
+			case "down", "j":
+				if m.pyClassCursor < len(m.pyClasses)-1 {
+					m.pyClassCursor++
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+
 		// --- 入力モードの処理 ---
 		if m.state == stateInput {
 			switch msg.Type {
 			case tea.KeyEnter:
-				// 入力されたターゲットクラス名を取得
 				target := m.textInput.Value()
 				if target != "" {
 					yamlContent, err := inspector.GenerateYamlFromTarget(target)
 					if err != nil {
 						m.errMsg = err.Error()
+						m.state = stateList
+						m.textInput.Blur()
 					} else {
-						// 成功したらファイルを保存してリストを再読み込み
-						savePath := filepath.Join("conf", "model", "generated.yaml")
-						oldContent, readErr := os.ReadFile(savePath)
-						capturedPath := savePath
-						capturedNew := []byte(yamlContent)
-						var undoAction func() error
-						if readErr == nil {
-							capturedOld := oldContent
-							undoAction = func() error { return os.WriteFile(capturedPath, capturedOld, 0644) }
-						} else {
-							undoAction = func() error { return os.Remove(capturedPath) }
-						}
-						m.history.Save(m,
-							undoAction,
-							func() error { return os.WriteFile(capturedPath, capturedNew, 0644) },
-						)
-						os.WriteFile(savePath, []byte(yamlContent), 0644)
-
-						// ファイルをリストを最新の状態に更新、マスターリストにも同期
-						m.files, _ = config.LoadYamlFiles("conf")
-						m.allFiles = m.files
-						m.errMsg = "保存しました: " + savePath
+						// 生成成功 → 保存先確認モードへ
+						m.generatedYaml = yamlContent
+						m.pendingTarget = target
+						m.state = stateSavePath
+						m.textInput.SetValue(moduleToSavePath(target, m.confDir))
+						m.textInput.Placeholder = "保存先のパス"
 					}
+				} else {
+					m.state = stateList
+					m.textInput.Blur()
 				}
+				return m, nil
+			case tea.KeyEsc:
 				m.state = stateList
 				m.textInput.Blur()
 				return m, nil
+			}
+			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+		}
+
+		// --- 保存先確認・編集モードの処理 ---
+		if m.state == stateSavePath {
+			switch msg.Type {
 			case tea.KeyEsc:
+				m.state = stateInput
+				m.textInput.SetValue(m.pendingTarget)
+				m.textInput.Placeholder = "クラスパスを確認・編集してEnterで生成"
+				return m, nil
+			case tea.KeyEnter:
+				savePath := m.textInput.Value()
+				if savePath != "" {
+					oldContent, readErr := os.ReadFile(savePath)
+					capturedPath := savePath
+					capturedNew := []byte(m.generatedYaml)
+					var undoAction func() error
+					if readErr == nil {
+						capturedOld := oldContent
+						undoAction = func() error { return os.WriteFile(capturedPath, capturedOld, 0644) }
+					} else {
+						undoAction = func() error { return os.Remove(capturedPath) }
+					}
+					m.history.Save(m,
+						undoAction,
+						func() error { return os.WriteFile(capturedPath, capturedNew, 0644) },
+					)
+					os.MkdirAll(filepath.Dir(savePath), 0755)
+					os.WriteFile(savePath, []byte(m.generatedYaml), 0644)
+					m.files, _ = config.LoadYamlFiles(m.confDir)
+					m.allFiles = m.files
+					m.errMsg = "保存しました: " + savePath
+				}
 				m.state = stateList
 				m.textInput.Blur()
 				return m, nil
@@ -331,7 +513,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if newPath != "" {
 					sourceFile := m.files[m.cursor]
 					// 保存先のパスを組み立てる
-					destFile := filepath.Join("conf", filepath.FromSlash(newPath))
+					destFile := filepath.Join(m.confDir, filepath.FromSlash(newPath))
 
 					// 新しいディレクトリが含まれていれば自動で作成
 					err := os.MkdirAll(filepath.Dir(destFile), 0755)
@@ -350,7 +532,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									func() error { return os.WriteFile(capturedDest, capturedContent, 0644) },
 								)
 								m.errMsg = "✨ 複製しました: " + destFile
-								m.files, _ = config.LoadYamlFiles("conf")
+								m.files, _ = config.LoadYamlFiles(m.confDir)
 								m.allFiles = m.files
 							} else {
 								m.errMsg = "書き込みエラー: " + err.Error()
@@ -385,7 +567,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.errMsg = "削除エラー: " + err.Error()
 				} else {
 					m.errMsg = "🗑 削除しました: " + targetFile
-					m.files, _ = config.LoadYamlFiles("conf")
+					m.files, _ = config.LoadYamlFiles(m.confDir)
 					m.allFiles = m.files
 					if m.cursor >= len(m.files) {
 						m.cursor = max(0, len(m.files)-1)
@@ -465,7 +647,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.errMsg = "Undoエラー: " + err.Error()
 				} else {
-					m.files, _ = config.LoadYamlFiles("conf")
+					m.files, _ = config.LoadYamlFiles(m.confDir)
 					m.allFiles = m.files
 					m.cursor = snap.cursor
 					if m.cursor >= len(m.files) {
@@ -480,7 +662,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.errMsg = "Redoエラー: " + err.Error()
 				} else {
-					m.files, _ = config.LoadYamlFiles("conf")
+					m.files, _ = config.LoadYamlFiles(m.confDir)
 					m.allFiles = m.files
 					m.cursor = snap.cursor
 					if m.cursor >= len(m.files) {
@@ -490,10 +672,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, cmd)
 				}
 			}
-		case "n": // 'n'キーで新規作成（入力モード）へ移行
-			m.state = stateInput
-			m.textInput.SetValue("src.models.vae.MotionVAE") // テスト用初期値
+		case "n":
+			m.state = statePyFileSearch
+			m.textInput.SetValue("")
+			m.textInput.Placeholder = "検索: 例) models.vae"
 			m.textInput.Focus()
+			m.pyFiles = config.LoadPyModules(SrcDir)
+			m.filteredFiles = m.pyFiles
+			m.pyFileCursor = 0
 			m.errMsg = ""
 			return m, textinput.Blink
 		case "a":
@@ -618,12 +804,50 @@ func (m Model) View() string {
 		}
 	}
 
+	// --- PythonファイルからYAML生成モードのUIの描画 ---
+	if m.state == statePyFileSearch {
+		listStr += "\n" + titleStyle.Render("🐍 Select Python File") + "\n"
+		listStr += m.textInput.View() + "\n\n"
+		for i, f := range m.filteredFiles {
+			if i >= 10 {
+				listStr += "  ...and more\n"
+				break
+			}
+			if m.pyFileCursor == i {
+				listStr += selectedItemStyle.Render("> "+f) + "\n"
+			} else {
+				listStr += "  " + f + "\n"
+			}
+		}
+		listStr += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 選択, Enter: 確定, Esc: キャンセル)")
+	}
+
+	// --- Pythonクラス選択モードのUIの描画 ---
+	if m.state == statePyClassSelect {
+		listStr += "\n" + titleStyle.Render("🐍 Select Class: "+m.selectedPyModule) + "\n\n"
+		for i, c := range m.pyClasses {
+			if m.pyClassCursor == i {
+				listStr += selectedItemStyle.Render("> "+c) + "\n"
+			} else {
+				listStr += "  " + c + "\n"
+			}
+		}
+		listStr += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 選択, Enter: 確定, Esc: 戻る)")
+	}
+
 	// --- 入力モードのUIを追加表示 ---
 	if m.state == stateInput {
 		listStr += "\n" + titleStyle.Render("✨ Generate Config") + "\n"
 		listStr += "Target Class Path:\n"
 		listStr += m.textInput.View() + "\n\n"
 		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(Enterで生成 / Escでキャンセル)")
+	}
+
+	// --- 保存先確認・編集モードのUIの描画 ---
+	if m.state == stateSavePath {
+		listStr += "\n" + titleStyle.Render("💾 Save Path") + "\n"
+		listStr += m.textInput.View() + "\n\n"
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(Enterで保存 / Escでクラス選択に戻る)")
 	}
 
 	// --- オートコンプリートUIの描画 ---

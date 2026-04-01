@@ -1,0 +1,5 @@
+_target_: models.classifier.ActionClassifier
+num_classes: ??? # 必須項目 # type: int
+feature_dim: 256 # type: int
+dropout: 0.5 # type: float
+use_batchnorm: true # type: bool

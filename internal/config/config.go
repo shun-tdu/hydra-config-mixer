@@ -37,6 +37,50 @@ func HighlightYAML(content string) string {
 	return buf.String()
 }
 
+// LoadPyModules は rootDir 以下の .py ファイルをPythonモジュールパスとして返す。
+// __init__.py は除外する。
+func LoadPyModules(rootDir string) []string {
+	var modules []string
+	filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".py") && d.Name() != "__init__.py" {
+			module := strings.TrimSuffix(path, ".py")
+			module = strings.ReplaceAll(module, string(filepath.Separator), ".")
+			module = strings.ReplaceAll(module, "/", ".")
+			modules = append(modules, module)
+		}
+		return nil
+	})
+	return modules
+}
+
+// LoadPyClasses は .py ファイルを読んでクラス名の一覧を返す。
+func LoadPyClasses(filePath string) []string {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+	var classes []string
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "class ") {
+			continue
+		}
+		// "class Foo:" や "class Foo(Bar):" からクラス名を取り出す
+		name := strings.TrimPrefix(trimmed, "class ")
+		name = strings.FieldsFunc(name, func(r rune) bool {
+			return r == ':' || r == '('
+		})[0]
+		name = strings.TrimSpace(name)
+		if name != "" {
+			classes = append(classes, name)
+		}
+	}
+	return classes
+}
+
 func EmbedConfigToYaml(targetFile string, embedPath string) error {
 	parts := strings.Split(embedPath, "/")
 
