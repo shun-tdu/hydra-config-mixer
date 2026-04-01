@@ -25,11 +25,13 @@ const (
 	stateEditLineList                      // ファイル内の行を選ぶモード
 	stateEditLineValue                     // 選んだ行の値を書き換えるモード
 	stateClone                             // コンフィグを複製するモード
+	stateSearchFiles                       // ファイルの絞り込み検索モード
 )
 
 // --- モデルの定義 ---
 type Model struct {
-	files              []string // 実際のファイルパスのリスト
+	files              []string // 絞り込みこまれているリスト
+	allFiles           []string // 全てのファイルのマスターリスト
 	cursor             int
 	width              int
 	height             int
@@ -56,6 +58,7 @@ func New(files []string) Model {
 
 	return Model{
 		files:     files,
+		allFiles:  files,
 		textInput: ti,
 		state:     stateList,
 	}
@@ -239,7 +242,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// 成功したらファイルを保存してリストを再読み込み
 						savePath := filepath.Join("conf", "model", "generated.yaml")
 						os.WriteFile(savePath, []byte(yamlContent), 0644)
+
+						// ファイルをリストを最新の状態に更新、マスターリストにも同期
 						m.files, _ = config.LoadYamlFiles("conf")
+						m.allFiles = m.files
 						m.errMsg = "保存しました: " + savePath
 					}
 				}
@@ -281,6 +287,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							if err == nil {
 								m.errMsg = "✨ 複製しました: " + destFile
 								m.files, _ = config.LoadYamlFiles("conf")
+								m.allFiles = m.files
 							} else {
 								m.errMsg = "書き込みエラー: " + err.Error()
 							}
@@ -295,6 +302,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+		}
+
+		// --- 検索(Fuzzy Finder)モードの処理 ---
+		if m.state == stateSearchFiles {
+			switch msg.String() {
+			case "esc":
+				// 検索をキャンセルして全ファイル表示に戻す
+				m.state = stateList
+				m.files = m.allFiles
+				m.cursor = 0
+				m.textInput.Blur()
+				m.updateViewportContent()
+				return m, nil
+			case "enter":
+				// 現在の絞り込み結果を確定して通常モードに戻る
+				m.state = stateList
+				m.textInput.Blur()
+				return m, nil
+			case "up", "k":
+				if m.cursor > 0 {
+					m.cursor--
+					m.updateViewportContent()
+				}
+				return m, nil
+			case "down", "j":
+				if m.cursor < len(m.files)-1 {
+					m.cursor++
+					m.updateViewportContent()
+				}
+				return m, nil
+			}
+
+			oldVal := m.textInput.Value()
+			m.textInput, cmd = m.textInput.Update(msg)
+
+			// 文字が入力、削除されて値が変わったらリアルタイムで絞り込みを実行
+			if m.textInput.Value() != oldVal {
+				query := strings.ToLower(m.textInput.Value())
+				var filtered []string
+
+				for _, f := range m.allFiles {
+					if strings.Contains(strings.ToLower(f), query) {
+						filtered = append(filtered, f)
+					}
+				}
+				m.files = filtered
+				m.cursor = 0
+				m.updateViewportContent()
+			}
 			return m, cmd
 		}
 
@@ -353,6 +410,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errMsg = ""
 				return m, textinput.Blink
 			}
+		case "/":
+			m.state = stateSearchFiles
+			m.textInput.SetValue("")
+			m.textInput.Placeholder = "ファイル検索 (例: vae)"
+			m.textInput.Focus()
+			m.errMsg = ""
+			return m, textinput.Blink
+
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -442,6 +507,14 @@ func (m Model) View() string {
 		listStr += "New File Path (under conf/):\n"
 		listStr += m.textInput.View() + "\n\n"
 		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(Enterで複製 / Escでキャンセル)")
+	}
+
+	// --- 検索モードのUIの描画 ---
+	if m.state == stateSearchFiles {
+		listStr += "🔍 Search:\n"
+		listStr += m.textInput.View() + "\n\n"
+	} else if m.state == stateList {
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'c'で複製, 'e'で編集)") + "\n\n"
 	}
 
 	if m.errMsg != "" {
