@@ -1,6 +1,6 @@
 defaults:
-  - model: generated
-  - optimizer: adamw
+  - model: transformer
+  - optimizer: sgd
 
 experiment_name: "motion_style_separation_001"
 batch_size: 32

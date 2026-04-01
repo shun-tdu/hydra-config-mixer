@@ -1,8 +1,7 @@
-﻿package config
+package config
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,19 +38,14 @@ func HighlightYAML(content string) string {
 }
 
 func EmbedConfigToYaml(targetFile string, embedPath string) error {
-	// 🌟 ここを embedPath に修正！
 	parts := strings.Split(embedPath, "/")
 
-	var group, name, searchPrefix, newLine string
+	var group, name string
 	if len(parts) >= 2 {
 		group = parts[0]
 		name = parts[len(parts)-1]
-		searchPrefix = "- " + group + ":"
-		newLine = fmt.Sprintf("  - %s: %s", group, name)
 	} else {
 		name = parts[0]
-		searchPrefix = "- " + name
-		newLine = fmt.Sprintf("  - %s", name)
 	}
 
 	contentBytes, err := os.ReadFile(targetFile)
@@ -63,6 +57,7 @@ func EmbedConfigToYaml(targetFile string, embedPath string) error {
 	inDefaults := false
 	replaced := false
 	defaultsIdx := -1
+	detectedIndent := "  " // デフォルトは2スペース
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
@@ -75,22 +70,37 @@ func EmbedConfigToYaml(targetFile string, embedPath string) error {
 			continue
 		}
 
-		// defaultsブロック内を走査して上書き対象を探す
+		// defaultsブロック内を走査する
 		if inDefaults {
 			// インデントがなくなったらdefaultsブロック終了とみなす
-			if len(trimmed) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "-") {
+			if len(trimmed) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, "-") {
 				inDefaults = false
-			} else if group != "" && strings.HasPrefix(trimmed, searchPrefix) {
-				lines[i] = newLine
-				replaced = true
-				break
+				continue
+			}
+
+			if strings.HasPrefix(trimmed, "-") {
+				// 既存行からインデントを検出
+				indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+				detectedIndent = indent
+
+				// 同じグループの行があれば上書き
+				if group != "" && strings.HasPrefix(trimmed, "- "+group+":") {
+					lines[i] = indent + "- " + group + ": " + name
+					replaced = true
+					break
+				}
 			}
 		}
 	}
 
-	// 既存のグループが見つからない場合は同じブロック内に追加
+	// 既存のグループが見つからない場合は追加
 	if defaultsIdx != -1 && !replaced {
-		// Goのsliceトリック（安全な挿入）
+		var newLine string
+		if group != "" {
+			newLine = detectedIndent + "- " + group + ": " + name
+		} else {
+			newLine = detectedIndent + "- " + name
+		}
 		var newLines []string
 		newLines = append(newLines, lines[:defaultsIdx+1]...)
 		newLines = append(newLines, newLine)
@@ -98,6 +108,12 @@ func EmbedConfigToYaml(targetFile string, embedPath string) error {
 		lines = newLines
 	} else if defaultsIdx == -1 {
 		// defaults: ブロックが存在しない場合は先頭に追加
+		var newLine string
+		if group != "" {
+			newLine = "  - " + group + ": " + name
+		} else {
+			newLine = "  - " + name
+		}
 		header := []string{"defaults:", newLine}
 		lines = append(header, lines...)
 	}

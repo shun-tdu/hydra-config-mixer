@@ -1,5 +1,0 @@
-_target_: models.vae.MotionVAE
-latent_dim: 64
-hidden_dims: [512, 256]
-kl_weight: 0.005
-activation: gelu

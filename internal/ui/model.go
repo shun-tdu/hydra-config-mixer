@@ -26,6 +26,7 @@ const (
 	stateEditLineValue                     // 選んだ行の値を書き換えるモード
 	stateClone                             // コンフィグを複製するモード
 	stateSearchFiles                       // ファイルの絞り込み検索モード
+	stateDeleteConfirm                     // 削除確認モード
 )
 
 // --- モデルの定義 ---
@@ -42,12 +43,14 @@ type Model struct {
 	errMsg             string
 	filteredFiles      []string
 	autoCompleteCursor int
+	warningMsg         string
 
 	// インライン編集用のデータ
-	editLines      []string
-	editCursor     int
-	editFile       string
-	editLinePrefix string
+	editLines       []string
+	editCursor      int
+	editFile        string
+	editLinePrefix  string
+	editLineComment string
 }
 
 func New(files []string) Model {
@@ -68,11 +71,12 @@ func (m Model) Init() tea.Cmd {
 	return nil
 }
 
-func (m *Model) updateViewportContent() {
+func (m *Model) updateViewportContent() tea.Cmd {
 	if len(m.files) == 0 {
-		return
+		return nil
 	}
 
+	m.warningMsg = ""
 	selectedFile := m.files[m.cursor]
 	contentBytes, err := os.ReadFile(selectedFile)
 	content := ""
@@ -83,6 +87,21 @@ func (m *Model) updateViewportContent() {
 	}
 	m.viewport.SetContent(content)
 	m.viewport.GotoTop()
+
+	return inspector.CheckTargetCmd(selectedFile)
+}
+
+func (m *Model) updateViewportHeight() {
+	baseHeight := m.height - 4 - 2
+	if m.warningMsg != "" {
+		paneWidth := (m.width - 6) / 2
+		innerWidth := paneWidth - 4
+		rendered := warningStyle.Width(innerWidth).Render(m.warningMsg)
+		warningLines := strings.Count(rendered, "\n") + 1
+		m.viewport.Height = baseHeight - warningLines
+	} else {
+		m.viewport.Height = baseHeight
+	}
 }
 
 func (m *Model) updateFilteredFiles() {
@@ -139,12 +158,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(parts) == 2 {
 					// 編集モードに入る前処理
 					m.editLinePrefix = parts[0] + ":"
-					currentVal := strings.TrimSpace(parts[1])
+					rawValue := strings.TrimSpace(parts[1])
 
-					m.textInput.SetValue(currentVal)
+					// コメントが含まれているか確認し、値と分離する
+					comment := ""
+					valParts := strings.SplitN(rawValue, "#", 2)
+					if len(valParts) == 2 {
+						rawValue = strings.TrimSpace(valParts[0])
+						comment = "#" + valParts[1]
+					}
+
+					m.textInput.SetValue(rawValue)
 					m.textInput.Placeholder = "新しい値を入力..."
 					m.textInput.Focus()
 					m.state = stateEditLineValue
+					m.editLineComment = comment
 					m.errMsg = ""
 				} else {
 					m.errMsg = "この行は編集できません（'キー: 値' の形式ではありません）"
@@ -163,7 +191,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case tea.KeyEnter:
 				newVal := m.textInput.Value()
-				m.editLines[m.editCursor] = m.editLinePrefix + " " + newVal
+				comment := strings.TrimSpace(strings.ReplaceAll(m.editLineComment, "# 必須項目", ""))
+				m.editLines[m.editCursor] = strings.TrimSpace(m.editLinePrefix + " " + newVal + " " + comment)
 
 				newContent := strings.Join(m.editLines, "\n")
 				err := os.WriteFile(m.editFile, []byte(newContent), 0644)
@@ -201,7 +230,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.errMsg = "書き込みエラー: " + err.Error()
 					} else {
 						m.errMsg = fmt.Sprintf("✨ %s に %s を追加しました", filepath.Base(targetFile), selected)
-						m.updateViewportContent()
+						cmd := m.updateViewportContent()
+						cmds = append(cmds, cmd)
 					}
 				}
 				m.state = stateList
@@ -305,6 +335,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// --- 削除確認モードの処理 ---
+		if m.state == stateDeleteConfirm {
+			switch msg.String() {
+			case "y":
+				targetFile := m.files[m.cursor]
+				if err := os.Remove(targetFile); err != nil {
+					m.errMsg = "削除エラー: " + err.Error()
+				} else {
+					m.errMsg = "🗑 削除しました: " + targetFile
+					m.files, _ = config.LoadYamlFiles("conf")
+					m.allFiles = m.files
+					if m.cursor >= len(m.files) {
+						m.cursor = max(0, len(m.files)-1)
+					}
+					cmd := m.updateViewportContent()
+					cmds = append(cmds, cmd)
+				}
+				m.state = stateList
+				return m, tea.Batch(cmds...)
+			case "n", "esc":
+				m.state = stateList
+				return m, nil
+			}
+			return m, nil
+		}
+
 		// --- 検索(Fuzzy Finder)モードの処理 ---
 		if m.state == stateSearchFiles {
 			switch msg.String() {
@@ -314,7 +370,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.files = m.allFiles
 				m.cursor = 0
 				m.textInput.Blur()
-				m.updateViewportContent()
+				cmd := m.updateViewportContent()
+				cmds = append(cmds, cmd)
 				return m, nil
 			case "enter":
 				// 現在の絞り込み結果を確定して通常モードに戻る
@@ -324,13 +381,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "up", "k":
 				if m.cursor > 0 {
 					m.cursor--
-					m.updateViewportContent()
+					cmd := m.updateViewportContent()
+					cmds = append(cmds, cmd)
 				}
 				return m, nil
 			case "down", "j":
 				if m.cursor < len(m.files)-1 {
 					m.cursor++
-					m.updateViewportContent()
+					cmd := m.updateViewportContent()
+					cmds = append(cmds, cmd)
 				}
 				return m, nil
 			}
@@ -350,7 +409,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.files = filtered
 				m.cursor = 0
-				m.updateViewportContent()
+				cmd := m.updateViewportContent()
+				cmds = append(cmds, cmd)
 			}
 			return m, cmd
 		}
@@ -410,6 +470,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errMsg = ""
 				return m, textinput.Blink
 			}
+		case "d":
+			if len(m.files) > 0 {
+				m.state = stateDeleteConfirm
+				m.errMsg = ""
+			}
+			return m, nil
 		case "/":
 			m.state = stateSearchFiles
 			m.textInput.SetValue("")
@@ -421,29 +487,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
-				m.updateViewportContent()
+				cmd := m.updateViewportContent()
+				cmds = append(cmds, cmd)
 			}
 		case "down", "j":
 			if m.cursor < len(m.files)-1 {
 				m.cursor++
-				m.updateViewportContent()
+				cmd := m.updateViewportContent()
+				cmds = append(cmds, cmd)
 			}
 		}
+
+	case inspector.TargetCheckMsg:
+		if !msg.Exists {
+			m.warningMsg = "⚠ _target_: " + msg.Target + " が見つかりません"
+		} else {
+			m.warningMsg = ""
+		}
+		m.updateViewportHeight()
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		paneWidth := (m.width - 6) / 2
-		vpHeight := m.height - 4 - 2
 
 		if !m.ready {
-			m.viewport = viewport.New(paneWidth, vpHeight)
-			m.updateViewportContent()
+			m.viewport = viewport.New(paneWidth, m.height-4-2)
+			cmd := m.updateViewportContent()
+			cmds = append(cmds, cmd)
 			m.ready = true
 		} else {
 			m.viewport.Width = paneWidth
-			m.viewport.Height = vpHeight
 		}
+		m.updateViewportHeight()
 	}
 
 	m.viewport, cmd = m.viewport.Update(msg)
@@ -513,8 +589,15 @@ func (m Model) View() string {
 	if m.state == stateSearchFiles {
 		listStr += "🔍 Search:\n"
 		listStr += m.textInput.View() + "\n\n"
+	} else if m.state == stateDeleteConfirm {
+		if len(m.files) > 0 {
+			target := strings.ReplaceAll(m.files[m.cursor], "\\", "/")
+			listStr += "\n" + warningStyle.Render("🗑 削除しますか?") + "\n"
+			listStr += target + "\n\n"
+			listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(y: 削除 / n, Esc: キャンセル)")
+		}
 	} else if m.state == stateList {
-		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'c'で複製, 'e'で編集)") + "\n\n"
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'c'で複製, 'e'で編集, 'd'で削除)") + "\n\n"
 	}
 
 	if m.errMsg != "" {
@@ -548,7 +631,14 @@ func (m Model) View() string {
 			selectedFile = m.files[m.cursor]
 		}
 		previewTitle := titleStyle.Render("📄 Preview: "+filepath.Base(selectedFile)) + "\n"
-		rightPaneContent = previewTitle + m.viewport.View()
+
+		// 警告があればタイトルとYamlの間に赤文字で挿入
+		warningBlock := ""
+		if m.warningMsg != "" {
+			warningBlock = warningStyle.Render(m.warningMsg) + "\n"
+		}
+
+		rightPaneContent = previewTitle + warningBlock + m.viewport.View()
 	}
 
 	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(rightPaneContent)

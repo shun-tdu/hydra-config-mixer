@@ -26,10 +26,19 @@ def get_class_signature(target_path):
             if has_default and not isinstance(default_val, (int, float, str, bool, type(None))):
                 default_val = str(default_val)
 
+            # 型ヒントの取得
+            type_hint = ""
+            if param.annotation is not inspect.Parameter.empty:
+                if hasattr(param.annotation, '__name__'):
+                    type_hint = param.annotation.__name__
+                else:
+                    type_hint = str(param.annotation).replace('typing.', '')
+
             params.append({
                 "name": name,
                 "has_default": has_default,
-                "default": default_val
+                "default": default_val,
+                'type': type_hint
             })
 
         return {"target": target_path, "params": params}
