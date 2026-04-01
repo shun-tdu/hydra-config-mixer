@@ -169,7 +169,7 @@ func (m *Model) updateViewportHeight() {
 		paneWidth := (m.width - 6) / 2
 		innerWidth := paneWidth - 4
 		rendered := warningStyle.Width(innerWidth).Render(m.warningMsg)
-		warningLines := strings.Count(rendered, "\n") + 1
+		warningLines := strings.Count(rendered, "\n")
 		m.viewport.Height = baseHeight - warningLines
 	} else {
 		m.viewport.Height = baseHeight
@@ -898,7 +898,6 @@ func (m Model) View() string {
 	if m.errMsg != "" {
 		listStr += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.errMsg)
 	}
-	leftPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(listStr)
 
 	// 右ペイン：プレビュー
 	var rightPaneContent string
@@ -925,18 +924,28 @@ func (m Model) View() string {
 		if len(m.files) > 0 {
 			selectedFile = m.files[m.cursor]
 		}
-		previewTitle := titleStyle.Render("📄 Preview: "+filepath.Base(selectedFile)) + "\n"
+		previewTitle := titleStyle.Render("📄 Preview: " + filepath.Base(selectedFile))
 
 		// 警告があればタイトルとYamlの間に赤文字で挿入
 		warningBlock := ""
 		if m.warningMsg != "" {
-			warningBlock = warningStyle.Render(m.warningMsg) + "\n"
+			warningBlock = warningStyle.Render(m.warningMsg)
 		}
 
 		rightPaneContent = previewTitle + warningBlock + m.viewport.View()
 	}
 
-	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(rightPaneContent)
+	// paneHeight を超えないように行数をクランプする（上端が見切れるのを防ぐ）
+	clamp := func(s string, max int) string {
+		lines := strings.Split(s, "\n")
+		if len(lines) > max {
+			lines = lines[:max]
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	leftPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(clamp(listStr, paneHeight))
+	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(clamp(rightPaneContent, paneHeight))
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 }
