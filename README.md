@@ -46,18 +46,31 @@ A terminal UI for managing [Hydra](https://hydra.cc/) configuration files — br
 
 ## Installation
 
-### Build from source
+### Download binary (recommended)
 
-```bash
-git clone https://github.com/yourname/hydra-config-mixer
-cd hydra-config-mixer
-go build -o hydra-config-mixer .
-```
+Download the archive for your platform from the [Releases page](https://github.com/shun-tdu/hydra-config-mixer/releases/latest):
+
+| OS | File |
+|---|---|
+| Windows (64bit) | `hydra-config-mixer_windows_amd64.zip` |
+| macOS (Intel) | `hydra-config-mixer_darwin_amd64.tar.gz` |
+| macOS (M1/M2) | `hydra-config-mixer_darwin_arm64.tar.gz` |
+| Linux (64bit) | `hydra-config-mixer_linux_amd64.tar.gz` |
+
+Extract and place the binary in your Hydra project root.
 
 ### Install with `go install`
 
 ```bash
-go install github.com/yourname/hydra-config-mixer@latest
+go install github.com/shun-tdu/hydra-config-mixer@latest
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/shun-tdu/hydra-config-mixer
+cd hydra-config-mixer
+go build -o hydra-config-mixer .
 ```
 
 ---

@@ -44,18 +44,31 @@
 
 ## インストール
 
-### ソースからビルド
+### バイナリをダウンロード（推奨）
 
-```bash
-git clone https://github.com/yourname/hydra-config-mixer
-cd hydra-config-mixer
-go build -o hydra-config-mixer .
-```
+[Releases ページ](https://github.com/shun-tdu/hydra-config-mixer/releases/latest) からお使いの OS に合ったファイルをダウンロードしてください：
+
+| OS | ファイル |
+|---|---|
+| Windows (64bit) | `hydra-config-mixer_windows_amd64.zip` |
+| macOS (Intel) | `hydra-config-mixer_darwin_amd64.tar.gz` |
+| macOS (M1/M2) | `hydra-config-mixer_darwin_arm64.tar.gz` |
+| Linux (64bit) | `hydra-config-mixer_linux_amd64.tar.gz` |
+
+解凍して、バイナリを Hydra プロジェクトのルートに置いて実行してください。
 
 ### `go install` でインストール
 
 ```bash
-go install github.com/yourname/hydra-config-mixer@latest
+go install github.com/shun-tdu/hydra-config-mixer@latest
+```
+
+### ソースからビルド
+
+```bash
+git clone https://github.com/shun-tdu/hydra-config-mixer
+cd hydra-config-mixer
+go build -o hydra-config-mixer .
 ```
 
 ---
