@@ -24,6 +24,7 @@ const (
 	stateAutoComplete                      // コンフィグ検索、補完モード
 	stateEditLineList                      // ファイル内の行を選ぶモード
 	stateEditLineValue                     // 選んだ行の値を書き換えるモード
+	stateClone                             // コンフィグを複製するモード
 )
 
 // --- モデルの定義 ---
@@ -110,7 +111,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// --- 編集する行を上下キーで選ぶ処理 ---
+		// --- 編集する行を上下キーで選ぶモードの処理 ---
 		if m.state == stateEditLineList {
 			switch msg.String() {
 			case "esc", "q":
@@ -150,7 +151,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// --- 値をテキストボックスで書き換えて保存する処理 ---
+		// --- 値をテキストボックスで書き換えて保存するモードの処理 ---
 		if m.state == stateEditLineValue {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -223,6 +224,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, cmd
 		}
+
 		// --- 入力モードの処理 ---
 		if m.state == stateInput {
 			switch msg.Type {
@@ -249,6 +251,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Blur()
 				return m, nil
 			}
+			m.textInput, cmd = m.textInput.Update(msg)
+			return m, cmd
+		}
+
+		// --- 複製モードの処理
+		if m.state == stateClone {
+			switch msg.String() {
+			case "esc":
+				m.state = stateList
+				m.textInput.Blur()
+				return m, nil
+			case "enter":
+				newPath := m.textInput.Value()
+				if newPath != "" {
+					sourceFile := m.files[m.cursor]
+					// 保存先のパスを組み立てる
+					destFile := filepath.Join("conf", filepath.FromSlash(newPath))
+
+					// 新しいディレクトリが含まれていれば自動で作成
+					err := os.MkdirAll(filepath.Dir(destFile), 0755)
+					if err != nil {
+						m.errMsg = "ディレクトリ作成エラー: " + err.Error()
+					} else {
+						// ファイルのコピー処理
+						inputBytes, err := os.ReadFile(sourceFile)
+						if err == nil {
+							err = os.WriteFile(destFile, inputBytes, 0644)
+							if err == nil {
+								m.errMsg = "✨ 複製しました: " + destFile
+								m.files, _ = config.LoadYamlFiles("conf")
+							} else {
+								m.errMsg = "書き込みエラー: " + err.Error()
+							}
+						} else {
+							m.errMsg = "読み込みエラー: " + err.Error()
+						}
+					}
+				}
+				m.state = stateList
+				m.textInput.Blur()
+				return m, nil
+			}
+
 			m.textInput, cmd = m.textInput.Update(msg)
 			return m, cmd
 		}
@@ -289,6 +334,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		case "c":
+			if len(m.files) > 0 {
+				m.state = stateClone
+				selectedFile := m.files[m.cursor]
+
+				// プレフィックスを消して表示用のパスを作成
+				cleanPath := strings.TrimPrefix(selectedFile, "conf\\")
+				cleanPath = strings.TrimPrefix(cleanPath, "conf/")
+				cleanPath = strings.ReplaceAll(cleanPath, "\\", "/")
+
+				// デフォルトの提案として"_copy"を付けた名前をセット
+				suggested := strings.TrimSuffix(cleanPath, ".yaml") + "_copy.yaml"
+
+				m.textInput.SetValue(suggested)
+				m.textInput.Placeholder = "新しいファイルパス (例: model/vae_large.yaml)"
+				m.textInput.Focus()
+				m.errMsg = ""
+				return m, textinput.Blink
+			}
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -342,7 +406,7 @@ func (m Model) View() string {
 		}
 	}
 
-	// 入力モードのUIを追加表示
+	// --- 入力モードのUIを追加表示 ---
 	if m.state == stateInput {
 		listStr += "\n" + titleStyle.Render("✨ Generate Config") + "\n"
 		listStr += "Target Class Path:\n"
@@ -350,7 +414,7 @@ func (m Model) View() string {
 		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(Enterで生成 / Escでキャンセル)")
 	}
 
-	// オートコンプリートUIの描画
+	// --- オートコンプリートUIの描画 ---
 	if m.state == stateAutoComplete {
 		listStr += "\n" + titleStyle.Render("🔍 Embed Config (Auto-complete)") + "\n"
 		listStr += m.textInput.View() + "\n\n"
@@ -370,6 +434,14 @@ func (m Model) View() string {
 			}
 		}
 		listStr += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 選択, Enter: 確定, Esc: キャンセル)")
+	}
+
+	// --- 複製モードのUIの描画 ---
+	if m.state == stateClone {
+		listStr += "\n" + titleStyle.Render("📋 Clone Config") + "\n"
+		listStr += "New File Path (under conf/):\n"
+		listStr += m.textInput.View() + "\n\n"
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(Enterで複製 / Escでキャンセル)")
 	}
 
 	if m.errMsg != "" {
