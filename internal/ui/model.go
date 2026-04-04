@@ -37,7 +37,6 @@ const (
 	statePyFileSearch                      // Pythonファイルを選んでYAMLを生成するモード
 	statePyClassSelect                     // Pythonファイル内のクラスを選ぶモード
 	stateSavePath                          // 生成YAMLの保存先を確認・編集するモード
-	stateDefaultsEdit                      // defaults: ブロックを編集するモード
 )
 
 // --- モデルの定義 ---
@@ -73,12 +72,6 @@ type Model struct {
 	// YAML生成・保存用のデータ
 	generatedYaml string
 	pendingTarget string
-
-	// defaults: 編集用のデータ
-	defaultsEntries    []string
-	defaultsOriginal   []string // 破棄用に元の状態を保持
-	defaultsCursor     int
-	defaultsFile       string
 
 	// ディレクトリ設定
 	confDir string
@@ -177,6 +170,31 @@ func (m *Model) buildDepPaneContent() string {
 	}
 
 	return sb.String()
+}
+
+// isInDefaultsBlock はその行インデックスが defaults: ブロック内のリストエントリかどうかを返す
+func isInDefaultsBlock(lines []string, idx int) bool {
+	if idx < 0 || idx >= len(lines) {
+		return false
+	}
+	trimmed := strings.TrimSpace(lines[idx])
+	if !strings.HasPrefix(trimmed, "-") {
+		return false
+	}
+	for i := idx - 1; i >= 0; i-- {
+		t := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(t, "defaults:") {
+			return true
+		}
+		if t == "" {
+			continue
+		}
+		// インデントのない非defaults行に当たったら範囲外
+		if !strings.HasPrefix(lines[i], " ") && !strings.HasPrefix(lines[i], "\t") {
+			return false
+		}
+	}
+	return false
 }
 
 func (m *Model) updateViewportContent() tea.Cmd {
@@ -282,63 +300,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// --- defaults: 編集モードの処理 ---
-		if m.state == stateDefaultsEdit {
-			switch msg.String() {
-			case "esc":
-				// 保存して終了
-				old := m.defaultsOriginal
-				new := append([]string{}, m.defaultsEntries...)
-				capturedFile := m.defaultsFile
-				if err := config.WriteDefaultsEntries(capturedFile, new); err != nil {
-					m.errMsg = "保存エラー: " + err.Error()
-				} else {
-					m.errMsg = "✨ defaults を更新しました"
-					m.history.Save(m,
-						func() error { return config.WriteDefaultsEntries(capturedFile, old) },
-						func() error { return config.WriteDefaultsEntries(capturedFile, new) },
-					)
-					m.reloadFiles()
-				}
-				m.state = stateList
-				cmd := m.updateViewportContent()
-				return m, cmd
-			case "q":
-				// 破棄して終了
-				m.state = stateList
-				return m, nil
-			case "up", "k":
-				if m.defaultsCursor > 0 {
-					m.defaultsCursor--
-				}
-			case "down", "j":
-				if m.defaultsCursor < len(m.defaultsEntries)-1 {
-					m.defaultsCursor++
-				}
-			case "K": // 選択エントリを上に移動
-				i := m.defaultsCursor
-				if i > 0 {
-					m.defaultsEntries[i-1], m.defaultsEntries[i] = m.defaultsEntries[i], m.defaultsEntries[i-1]
-					m.defaultsCursor--
-				}
-			case "J": // 選択エントリを下に移動
-				i := m.defaultsCursor
-				if i < len(m.defaultsEntries)-1 {
-					m.defaultsEntries[i+1], m.defaultsEntries[i] = m.defaultsEntries[i], m.defaultsEntries[i+1]
-					m.defaultsCursor++
-				}
-			case "x", "backspace":
-				if len(m.defaultsEntries) > 0 {
-					i := m.defaultsCursor
-					m.defaultsEntries = append(m.defaultsEntries[:i], m.defaultsEntries[i+1:]...)
-					if m.defaultsCursor >= len(m.defaultsEntries) {
-						m.defaultsCursor = max(0, len(m.defaultsEntries)-1)
-					}
-				}
-			}
-			return m, nil
-		}
-
 		// --- 編集する行を上下キーで選ぶモードの処理 ---
 		if m.state == stateEditLineList {
 			switch msg.String() {
@@ -357,7 +318,73 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editCursor++
 				}
 				return m, nil
+			case "K":
+				// defaults エントリを上に移動
+				i := m.editCursor
+				if isInDefaultsBlock(m.editLines, i) {
+					for prev := i - 1; prev >= 0; prev-- {
+						if isInDefaultsBlock(m.editLines, prev) {
+							oldContent, _ := os.ReadFile(m.editFile)
+							m.editLines[prev], m.editLines[i] = m.editLines[i], m.editLines[prev]
+							m.editCursor = prev
+							newContent := strings.Join(m.editLines, "\n")
+							capturedFile, capturedOld, capturedNew := m.editFile, oldContent, []byte(newContent)
+							m.history.Save(m,
+								func() error { return os.WriteFile(capturedFile, capturedOld, 0644) },
+								func() error { return os.WriteFile(capturedFile, capturedNew, 0644) },
+							)
+							os.WriteFile(m.editFile, []byte(newContent), 0644)
+							break
+						}
+					}
+				}
+				return m, nil
+			case "J":
+				// defaults エントリを下に移動
+				i := m.editCursor
+				if isInDefaultsBlock(m.editLines, i) {
+					for next := i + 1; next < len(m.editLines); next++ {
+						if isInDefaultsBlock(m.editLines, next) {
+							oldContent, _ := os.ReadFile(m.editFile)
+							m.editLines[next], m.editLines[i] = m.editLines[i], m.editLines[next]
+							m.editCursor = next
+							newContent := strings.Join(m.editLines, "\n")
+							capturedFile, capturedOld, capturedNew := m.editFile, oldContent, []byte(newContent)
+							m.history.Save(m,
+								func() error { return os.WriteFile(capturedFile, capturedOld, 0644) },
+								func() error { return os.WriteFile(capturedFile, capturedNew, 0644) },
+							)
+							os.WriteFile(m.editFile, []byte(newContent), 0644)
+							break
+						}
+					}
+				}
+				return m, nil
+			case "x":
+				// defaults エントリを削除
+				i := m.editCursor
+				if isInDefaultsBlock(m.editLines, i) {
+					oldContent, _ := os.ReadFile(m.editFile)
+					m.editLines = append(m.editLines[:i], m.editLines[i+1:]...)
+					if m.editCursor >= len(m.editLines) {
+						m.editCursor = max(0, len(m.editLines)-1)
+					}
+					newContent := strings.Join(m.editLines, "\n")
+					capturedFile, capturedOld, capturedNew := m.editFile, oldContent, []byte(newContent)
+					m.history.Save(m,
+						func() error { return os.WriteFile(capturedFile, capturedOld, 0644) },
+						func() error { return os.WriteFile(capturedFile, capturedNew, 0644) },
+					)
+					os.WriteFile(m.editFile, []byte(newContent), 0644)
+					m.reloadFiles()
+				}
+				return m, nil
 			case "enter":
+				// defaults エントリは値編集不可
+				if isInDefaultsBlock(m.editLines, m.editCursor) {
+					m.errMsg = "defaults エントリは K/J で並び替え、x で削除できます"
+					return m, nil
+				}
 				// 選んだ行を":"で左右に分割
 				line := m.editLines[m.editCursor]
 				parts := strings.SplitN(line, ":", 2)
@@ -857,24 +884,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errMsg = ""
 				return m, textinput.Blink
 			}
-		case "D":
-			if len(m.files) > 0 {
-				selectedFile := m.files[m.cursor]
-				entries, err := config.ReadDefaultsEntries(selectedFile)
-				if err != nil {
-					m.errMsg = "読み込みエラー: " + err.Error()
-				} else if len(entries) == 0 {
-					m.errMsg = "このファイルに defaults: ブロックはありません"
-				} else {
-					m.defaultsFile = selectedFile
-					m.defaultsEntries = entries
-					m.defaultsOriginal = append([]string{}, entries...)
-					m.defaultsCursor = 0
-					m.state = stateDefaultsEdit
-					m.errMsg = ""
-				}
-			}
-			return m, nil
 		case "d":
 			if len(m.files) > 0 {
 				m.state = stateDeleteConfirm
@@ -1040,7 +1049,7 @@ func (m Model) View() string {
 			listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(y: 削除 / n, Esc: キャンセル)")
 		}
 	} else if m.state == stateList {
-		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'D'でdefaults編集, 'c'で複製, 'e'で編集, 'd'で削除)") + "\n\n"
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'c'で複製, 'e'で編集, 'd'で削除)") + "\n\n"
 	}
 
 	if m.errMsg != "" {
@@ -1050,23 +1059,7 @@ func (m Model) View() string {
 	// 右ペイン：プレビュー
 	var rightPaneContent string
 
-	if m.state == stateDefaultsEdit {
-		var sb strings.Builder
-		sb.WriteString(titleStyle.Render("⚙️  Defaults: "+filepath.Base(m.defaultsFile)) + "\n\n")
-		for i, entry := range m.defaultsEntries {
-			if i == m.defaultsCursor {
-				sb.WriteString(selectedItemStyle.Render("> - "+entry) + "\n")
-			} else {
-				sb.WriteString("  - " + entry + "\n")
-			}
-		}
-		if len(m.defaultsEntries) == 0 {
-			sb.WriteString("  (エントリなし)\n")
-		}
-		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
-			"(↑/↓: 選択  K/J: 並び替え  x: 削除  Esc: 保存  q: 破棄)"))
-		rightPaneContent = sb.String()
-	} else if m.state == stateEditLineList || m.state == stateEditLineValue {
+	if m.state == stateEditLineList || m.state == stateEditLineValue {
 		var sb strings.Builder
 		sb.WriteString(titleStyle.Render("✏️ Inline Edit: "+filepath.Base(m.editFile)) + "\n\n")
 
@@ -1102,7 +1095,11 @@ func (m Model) View() string {
 				sb.WriteString("   " + line + "\n")
 			}
 		}
-		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 行選択, Enter: 編集/保存, Esc: 終了)"))
+		hint := "(↑/↓: 行選択  Enter: 編集/保存  Esc: 終了)"
+		if isInDefaultsBlock(m.editLines, m.editCursor) {
+			hint = "(↑/↓: 移動  K/J: 並び替え  x: 削除  Esc: 終了)"
+		}
+		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(hint))
 		rightPaneContent = sb.String()
 	} else {
 		var selectedFile string
