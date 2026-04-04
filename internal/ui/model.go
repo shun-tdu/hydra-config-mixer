@@ -52,8 +52,9 @@ type Model struct {
 	ready              bool
 	errMsg             string
 	filteredFiles      []string
-	autoCompleteCursor int
-	warningMsg         string
+	autoCompleteCursor      int
+	autoCompleteReturnState sessionState // オートコンプリート終了後の戻り先
+	warningMsg              string
 
 	// インライン編集用のデータ
 	editLines       []string
@@ -318,6 +319,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editCursor++
 				}
 				return m, nil
+			case "a":
+				// 編集モードからもオートコンプリートで defaults に追加
+				m.autoCompleteReturnState = stateEditLineList
+				m.state = stateAutoComplete
+				m.textInput.SetValue("")
+				m.textInput.Placeholder = "検索: 例) models/vae"
+				m.textInput.Focus()
+				m.updateFilteredFiles()
+				m.autoCompleteCursor = 0
+				m.errMsg = ""
+				return m, textinput.Blink
 			case "K":
 				// defaults エントリを上に移動
 				i := m.editCursor
@@ -459,13 +471,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == stateAutoComplete {
 			switch msg.String() {
 			case "esc":
-				m.state = stateList
+				m.state = m.autoCompleteReturnState
+				m.autoCompleteReturnState = stateList
 				m.textInput.Blur()
 				return m, nil
 			case "enter":
 				if len(m.filteredFiles) > 0 {
 					selected := m.filteredFiles[m.autoCompleteCursor]
 					targetFile := m.files[m.cursor]
+					if m.autoCompleteReturnState == stateEditLineList {
+						targetFile = m.editFile
+					}
 
 					err := config.EmbedConfigToYaml(targetFile, selected)
 					if err != nil {
@@ -474,11 +490,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.errMsg = fmt.Sprintf("✨ %s に %s を追加しました", filepath.Base(targetFile), selected)
 						cmd := m.updateViewportContent()
 						cmds = append(cmds, cmd)
+						// 編集モードから来た場合は editLines を再読み込み
+						if m.autoCompleteReturnState == stateEditLineList {
+							contentBytes, _ := os.ReadFile(m.editFile)
+							clean := strings.ReplaceAll(string(contentBytes), "\r\n", "\n")
+							m.editLines = strings.Split(clean, "\n")
+						}
 					}
 				}
-				m.state = stateList
+				m.state = m.autoCompleteReturnState
+				m.autoCompleteReturnState = stateList
 				m.textInput.Blur()
-				return m, nil
+				return m, tea.Batch(cmds...)
 			case "up", "ctrl+k":
 				if m.autoCompleteCursor > 0 {
 					m.autoCompleteCursor--
@@ -840,6 +863,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = ""
 			return m, textinput.Blink
 		case "a":
+			m.autoCompleteReturnState = stateList
 			m.state = stateAutoComplete
 			m.textInput.SetValue("")
 			m.textInput.Placeholder = "検索: 例) models/vae"
