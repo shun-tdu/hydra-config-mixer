@@ -211,7 +211,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q":
 				m.state = stateList
 				m.updateFilteredFiles()
-				return m, nil
+				cmd := m.updateViewportContent()
+				return m, cmd
 			case "up", "k":
 				if m.editCursor > 0 {
 					m.editCursor--
@@ -932,7 +933,11 @@ func (m Model) View() string {
 			warningBlock = warningStyle.Render(m.warningMsg)
 		}
 
-		rightPaneContent = previewTitle + warningBlock + m.viewport.View()
+		if m.warningMsg != "" {
+			rightPaneContent = lipgloss.JoinVertical(lipgloss.Left, previewTitle, warningBlock, m.viewport.View())
+		} else {
+			rightPaneContent = lipgloss.JoinVertical(lipgloss.Left, previewTitle, m.viewport.View())
+		}
 	}
 
 	// paneHeight を超えないように行数をクランプする（上端が見切れるのを防ぐ）
