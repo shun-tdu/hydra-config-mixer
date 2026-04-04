@@ -135,6 +135,80 @@ func ParseDefaults(filePath string, confDir string) []string {
 	return deps
 }
 
+// ReadDefaultsEntries はYAMLファイルの defaults: ブロックのエントリを生文字列スライスで返す
+func ReadDefaultsEntries(filePath string) ([]string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(content), "\n")
+	inDefaults := false
+	var entries []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "defaults:") {
+			inDefaults = true
+			continue
+		}
+		if inDefaults {
+			if len(trimmed) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, "-") {
+				break
+			}
+			if strings.HasPrefix(trimmed, "-") {
+				entries = append(entries, strings.TrimSpace(strings.TrimPrefix(trimmed, "-")))
+			}
+		}
+	}
+	return entries, nil
+}
+
+// WriteDefaultsEntries はYAMLファイルの defaults: ブロックを entries で上書きする
+func WriteDefaultsEntries(filePath string, entries []string) error {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(content), "\n")
+
+	defaultsStart := -1
+	defaultsEnd := -1
+	indent := "  "
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "defaults:") {
+			defaultsStart = i
+			continue
+		}
+		if defaultsStart >= 0 && defaultsEnd < 0 {
+			if len(trimmed) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, "-") {
+				defaultsEnd = i
+				break
+			}
+			if strings.HasPrefix(trimmed, "-") {
+				indent = line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			}
+		}
+	}
+
+	if defaultsStart < 0 {
+		return nil
+	}
+	if defaultsEnd < 0 {
+		defaultsEnd = len(lines)
+	}
+
+	var newLines []string
+	newLines = append(newLines, lines[:defaultsStart+1]...)
+	for _, entry := range entries {
+		newLines = append(newLines, indent+"- "+entry)
+	}
+	newLines = append(newLines, lines[defaultsEnd:]...)
+
+	return os.WriteFile(filePath, []byte(strings.Join(newLines, "\n")), 0644)
+}
+
 // BuildDepGraph は全YAMLファイルの依存グラフを構築する。
 // 戻り値は forward（ファイル→依存先）と reverse（ファイル→被依存元）の2つのマップ。
 func BuildDepGraph(files []string, confDir string) (forward, reverse map[string][]string) {

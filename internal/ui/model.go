@@ -52,8 +52,9 @@ type Model struct {
 	ready              bool
 	errMsg             string
 	filteredFiles      []string
-	autoCompleteCursor int
-	warningMsg         string
+	autoCompleteCursor      int
+	autoCompleteReturnState sessionState // オートコンプリート終了後の戻り先
+	warningMsg              string
 
 	// インライン編集用のデータ
 	editLines       []string
@@ -170,6 +171,31 @@ func (m *Model) buildDepPaneContent() string {
 	}
 
 	return sb.String()
+}
+
+// isInDefaultsBlock はその行インデックスが defaults: ブロック内のリストエントリかどうかを返す
+func isInDefaultsBlock(lines []string, idx int) bool {
+	if idx < 0 || idx >= len(lines) {
+		return false
+	}
+	trimmed := strings.TrimSpace(lines[idx])
+	if !strings.HasPrefix(trimmed, "-") {
+		return false
+	}
+	for i := idx - 1; i >= 0; i-- {
+		t := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(t, "defaults:") {
+			return true
+		}
+		if t == "" {
+			continue
+		}
+		// インデントのない非defaults行に当たったら範囲外
+		if !strings.HasPrefix(lines[i], " ") && !strings.HasPrefix(lines[i], "\t") {
+			return false
+		}
+	}
+	return false
 }
 
 func (m *Model) updateViewportContent() tea.Cmd {
@@ -293,7 +319,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.editCursor++
 				}
 				return m, nil
+			case "a":
+				// 編集モードからもオートコンプリートで defaults に追加
+				m.autoCompleteReturnState = stateEditLineList
+				m.state = stateAutoComplete
+				m.textInput.SetValue("")
+				m.textInput.Placeholder = "検索: 例) models/vae"
+				m.textInput.Focus()
+				m.updateFilteredFiles()
+				m.autoCompleteCursor = 0
+				m.errMsg = ""
+				return m, textinput.Blink
+			case "K":
+				// defaults エントリを上に移動
+				i := m.editCursor
+				if isInDefaultsBlock(m.editLines, i) {
+					for prev := i - 1; prev >= 0; prev-- {
+						if isInDefaultsBlock(m.editLines, prev) {
+							oldContent, _ := os.ReadFile(m.editFile)
+							m.editLines[prev], m.editLines[i] = m.editLines[i], m.editLines[prev]
+							m.editCursor = prev
+							newContent := strings.Join(m.editLines, "\n")
+							capturedFile, capturedOld, capturedNew := m.editFile, oldContent, []byte(newContent)
+							m.history.Save(m,
+								func() error { return os.WriteFile(capturedFile, capturedOld, 0644) },
+								func() error { return os.WriteFile(capturedFile, capturedNew, 0644) },
+							)
+							os.WriteFile(m.editFile, []byte(newContent), 0644)
+							break
+						}
+					}
+				}
+				return m, nil
+			case "J":
+				// defaults エントリを下に移動
+				i := m.editCursor
+				if isInDefaultsBlock(m.editLines, i) {
+					for next := i + 1; next < len(m.editLines); next++ {
+						if isInDefaultsBlock(m.editLines, next) {
+							oldContent, _ := os.ReadFile(m.editFile)
+							m.editLines[next], m.editLines[i] = m.editLines[i], m.editLines[next]
+							m.editCursor = next
+							newContent := strings.Join(m.editLines, "\n")
+							capturedFile, capturedOld, capturedNew := m.editFile, oldContent, []byte(newContent)
+							m.history.Save(m,
+								func() error { return os.WriteFile(capturedFile, capturedOld, 0644) },
+								func() error { return os.WriteFile(capturedFile, capturedNew, 0644) },
+							)
+							os.WriteFile(m.editFile, []byte(newContent), 0644)
+							break
+						}
+					}
+				}
+				return m, nil
+			case "x":
+				// defaults エントリを削除
+				i := m.editCursor
+				if isInDefaultsBlock(m.editLines, i) {
+					oldContent, _ := os.ReadFile(m.editFile)
+					m.editLines = append(m.editLines[:i], m.editLines[i+1:]...)
+					if m.editCursor >= len(m.editLines) {
+						m.editCursor = max(0, len(m.editLines)-1)
+					}
+					newContent := strings.Join(m.editLines, "\n")
+					capturedFile, capturedOld, capturedNew := m.editFile, oldContent, []byte(newContent)
+					m.history.Save(m,
+						func() error { return os.WriteFile(capturedFile, capturedOld, 0644) },
+						func() error { return os.WriteFile(capturedFile, capturedNew, 0644) },
+					)
+					os.WriteFile(m.editFile, []byte(newContent), 0644)
+					m.reloadFiles()
+				}
+				return m, nil
 			case "enter":
+				// defaults エントリは値編集不可
+				if isInDefaultsBlock(m.editLines, m.editCursor) {
+					m.errMsg = "defaults エントリは K/J で並び替え、x で削除できます"
+					return m, nil
+				}
 				// 選んだ行を":"で左右に分割
 				line := m.editLines[m.editCursor]
 				parts := strings.SplitN(line, ":", 2)
@@ -368,13 +471,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == stateAutoComplete {
 			switch msg.String() {
 			case "esc":
-				m.state = stateList
+				m.state = m.autoCompleteReturnState
+				m.autoCompleteReturnState = stateList
 				m.textInput.Blur()
 				return m, nil
 			case "enter":
 				if len(m.filteredFiles) > 0 {
 					selected := m.filteredFiles[m.autoCompleteCursor]
 					targetFile := m.files[m.cursor]
+					if m.autoCompleteReturnState == stateEditLineList {
+						targetFile = m.editFile
+					}
 
 					err := config.EmbedConfigToYaml(targetFile, selected)
 					if err != nil {
@@ -383,11 +490,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.errMsg = fmt.Sprintf("✨ %s に %s を追加しました", filepath.Base(targetFile), selected)
 						cmd := m.updateViewportContent()
 						cmds = append(cmds, cmd)
+						// 編集モードから来た場合は editLines を再読み込み
+						if m.autoCompleteReturnState == stateEditLineList {
+							contentBytes, _ := os.ReadFile(m.editFile)
+							clean := strings.ReplaceAll(string(contentBytes), "\r\n", "\n")
+							m.editLines = strings.Split(clean, "\n")
+						}
 					}
 				}
-				m.state = stateList
+				m.state = m.autoCompleteReturnState
+				m.autoCompleteReturnState = stateList
 				m.textInput.Blur()
-				return m, nil
+				return m, tea.Batch(cmds...)
 			case "up", "ctrl+k":
 				if m.autoCompleteCursor > 0 {
 					m.autoCompleteCursor--
@@ -749,6 +863,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = ""
 			return m, textinput.Blink
 		case "a":
+			m.autoCompleteReturnState = stateList
 			m.state = stateAutoComplete
 			m.textInput.SetValue("")
 			m.textInput.Placeholder = "検索: 例) models/vae"
@@ -1004,7 +1119,11 @@ func (m Model) View() string {
 				sb.WriteString("   " + line + "\n")
 			}
 		}
-		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 行選択, Enter: 編集/保存, Esc: 終了)"))
+		hint := "(↑/↓: 行選択  Enter: 編集/保存  Esc: 終了)"
+		if isInDefaultsBlock(m.editLines, m.editCursor) {
+			hint = "(↑/↓: 移動  K/J: 並び替え  x: 削除  Esc: 終了)"
+		}
+		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(hint))
 		rightPaneContent = sb.String()
 	} else {
 		var selectedFile string
