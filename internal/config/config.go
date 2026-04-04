@@ -264,29 +264,23 @@ type ConflictInfo struct {
 }
 
 // FindConflicts は filePath の defaults: を再帰的に展開し、競合しているキーを返す。
-// マージ順を保持するため deps は順序付きスライスで渡す。
+// Hydraのマージ順（DFS後順: 依存先が先にマージ → 後のものが優先）で収集する。
 func FindConflicts(filePath string, forward map[string][]string) []ConflictInfo {
-	// defaults を再帰的にフラット化（BFS、マージ順）
 	var ordered []string
 	visited := map[string]bool{}
-	queue := []string{filePath}
 
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		if visited[cur] {
-			continue
+	var dfs func(f string)
+	dfs = func(f string) {
+		if visited[f] {
+			return
 		}
-		visited[cur] = true
-		if cur != filePath {
-			ordered = append(ordered, cur)
+		visited[f] = true
+		for _, dep := range forward[f] {
+			dfs(dep)
 		}
-		for _, dep := range forward[cur] {
-			queue = append(queue, dep)
-		}
+		ordered = append(ordered, f)
 	}
-	// _self_ 相当として対象ファイル自身を末尾に追加
-	ordered = append(ordered, filePath)
+	dfs(filePath)
 
 	// キーごとに定義元を収集
 	keyMap := map[string][]KeySource{}
