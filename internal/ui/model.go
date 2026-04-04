@@ -37,6 +37,7 @@ const (
 	statePyFileSearch                      // Pythonファイルを選んでYAMLを生成するモード
 	statePyClassSelect                     // Pythonファイル内のクラスを選ぶモード
 	stateSavePath                          // 生成YAMLの保存先を確認・編集するモード
+	stateDefaultsEdit                      // defaults: ブロックを編集するモード
 )
 
 // --- モデルの定義 ---
@@ -72,6 +73,12 @@ type Model struct {
 	// YAML生成・保存用のデータ
 	generatedYaml string
 	pendingTarget string
+
+	// defaults: 編集用のデータ
+	defaultsEntries    []string
+	defaultsOriginal   []string // 破棄用に元の状態を保持
+	defaultsCursor     int
+	defaultsFile       string
 
 	// ディレクトリ設定
 	confDir string
@@ -275,6 +282,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// --- defaults: 編集モードの処理 ---
+		if m.state == stateDefaultsEdit {
+			switch msg.String() {
+			case "esc":
+				// 保存して終了
+				old := m.defaultsOriginal
+				new := append([]string{}, m.defaultsEntries...)
+				capturedFile := m.defaultsFile
+				if err := config.WriteDefaultsEntries(capturedFile, new); err != nil {
+					m.errMsg = "保存エラー: " + err.Error()
+				} else {
+					m.errMsg = "✨ defaults を更新しました"
+					m.history.Save(m,
+						func() error { return config.WriteDefaultsEntries(capturedFile, old) },
+						func() error { return config.WriteDefaultsEntries(capturedFile, new) },
+					)
+					m.reloadFiles()
+				}
+				m.state = stateList
+				cmd := m.updateViewportContent()
+				return m, cmd
+			case "q":
+				// 破棄して終了
+				m.state = stateList
+				return m, nil
+			case "up", "k":
+				if m.defaultsCursor > 0 {
+					m.defaultsCursor--
+				}
+			case "down", "j":
+				if m.defaultsCursor < len(m.defaultsEntries)-1 {
+					m.defaultsCursor++
+				}
+			case "K": // 選択エントリを上に移動
+				i := m.defaultsCursor
+				if i > 0 {
+					m.defaultsEntries[i-1], m.defaultsEntries[i] = m.defaultsEntries[i], m.defaultsEntries[i-1]
+					m.defaultsCursor--
+				}
+			case "J": // 選択エントリを下に移動
+				i := m.defaultsCursor
+				if i < len(m.defaultsEntries)-1 {
+					m.defaultsEntries[i+1], m.defaultsEntries[i] = m.defaultsEntries[i], m.defaultsEntries[i+1]
+					m.defaultsCursor++
+				}
+			case "x", "backspace":
+				if len(m.defaultsEntries) > 0 {
+					i := m.defaultsCursor
+					m.defaultsEntries = append(m.defaultsEntries[:i], m.defaultsEntries[i+1:]...)
+					if m.defaultsCursor >= len(m.defaultsEntries) {
+						m.defaultsCursor = max(0, len(m.defaultsEntries)-1)
+					}
+				}
+			}
+			return m, nil
+		}
+
 		// --- 編集する行を上下キーで選ぶモードの処理 ---
 		if m.state == stateEditLineList {
 			switch msg.String() {
@@ -793,6 +857,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errMsg = ""
 				return m, textinput.Blink
 			}
+		case "D":
+			if len(m.files) > 0 {
+				selectedFile := m.files[m.cursor]
+				entries, err := config.ReadDefaultsEntries(selectedFile)
+				if err != nil {
+					m.errMsg = "読み込みエラー: " + err.Error()
+				} else if len(entries) == 0 {
+					m.errMsg = "このファイルに defaults: ブロックはありません"
+				} else {
+					m.defaultsFile = selectedFile
+					m.defaultsEntries = entries
+					m.defaultsOriginal = append([]string{}, entries...)
+					m.defaultsCursor = 0
+					m.state = stateDefaultsEdit
+					m.errMsg = ""
+				}
+			}
+			return m, nil
 		case "d":
 			if len(m.files) > 0 {
 				m.state = stateDeleteConfirm
@@ -958,7 +1040,7 @@ func (m Model) View() string {
 			listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(y: 削除 / n, Esc: キャンセル)")
 		}
 	} else if m.state == stateList {
-		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'c'で複製, 'e'で編集, 'd'で削除)") + "\n\n"
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'D'でdefaults編集, 'c'で複製, 'e'で編集, 'd'で削除)") + "\n\n"
 	}
 
 	if m.errMsg != "" {
@@ -968,7 +1050,23 @@ func (m Model) View() string {
 	// 右ペイン：プレビュー
 	var rightPaneContent string
 
-	if m.state == stateEditLineList || m.state == stateEditLineValue {
+	if m.state == stateDefaultsEdit {
+		var sb strings.Builder
+		sb.WriteString(titleStyle.Render("⚙️  Defaults: "+filepath.Base(m.defaultsFile)) + "\n\n")
+		for i, entry := range m.defaultsEntries {
+			if i == m.defaultsCursor {
+				sb.WriteString(selectedItemStyle.Render("> - "+entry) + "\n")
+			} else {
+				sb.WriteString("  - " + entry + "\n")
+			}
+		}
+		if len(m.defaultsEntries) == 0 {
+			sb.WriteString("  (エントリなし)\n")
+		}
+		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(
+			"(↑/↓: 選択  K/J: 並び替え  x: 削除  Esc: 保存  q: 破棄)"))
+		rightPaneContent = sb.String()
+	} else if m.state == stateEditLineList || m.state == stateEditLineValue {
 		var sb strings.Builder
 		sb.WriteString(titleStyle.Render("✏️ Inline Edit: "+filepath.Base(m.editFile)) + "\n\n")
 
