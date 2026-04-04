@@ -1,0 +1,3 @@
+_target_: src.models.vae.KLDivergenceLoss
+beta: 1.0
+free_bits: 0.5
