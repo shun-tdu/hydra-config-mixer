@@ -37,6 +37,7 @@ const (
 	statePyFileSearch                      // Pythonファイルを選んでYAMLを生成するモード
 	statePyClassSelect                     // Pythonファイル内のクラスを選ぶモード
 	stateSavePath                          // 生成YAMLの保存先を確認・編集するモード
+	stateDepTree                           // 依存関係ツリー表示モード
 )
 
 // --- モデルの定義 ---
@@ -76,6 +77,10 @@ type Model struct {
 	// ディレクトリ設定
 	confDir string
 
+	// 依存グラフ
+	depForward map[string][]string // ファイル → 依存先
+	depReverse map[string][]string // ファイル → 被依存元
+
 	// Modelの履歴
 	history History
 }
@@ -86,20 +91,89 @@ func New(files []string, confDir string) Model {
 	ti.CharLimit = 156
 	ti.Width = 40
 
+	fwd, rev := config.BuildDepGraph(files, confDir)
 	m := Model{
-		files:     files,
-		allFiles:  files,
-		textInput: ti,
-		state:     stateList,
-		confDir:   confDir,
+		files:      files,
+		allFiles:   files,
+		textInput:  ti,
+		state:      stateList,
+		confDir:    confDir,
+		depForward: fwd,
+		depReverse: rev,
 	}
 
 	m.history.Save(m, nil, nil) // 初期状態を保存
 	return m
 }
 
+func (m *Model) reloadFiles() {
+	m.files, _ = config.LoadYamlFiles(m.confDir)
+	m.allFiles = m.files
+	m.depForward, m.depReverse = config.BuildDepGraph(m.files, m.confDir)
+}
+
 func (m Model) Init() tea.Cmd {
 	return nil
+}
+
+// renderDepTree はファイルを起点とした依存ツリーをASCIIアートで返す（循環参照をvisitedで防止）
+func renderDepTree(file string, forward map[string][]string, visited map[string]bool, prefix string, isLast bool) string {
+	connector := "├── "
+	childPrefix := prefix + "│   "
+	if isLast {
+		connector = "└── "
+		childPrefix = prefix + "    "
+	}
+	line := prefix + connector + filepath.Base(file) + "\n"
+
+	if visited[file] {
+		return line
+	}
+	visited[file] = true
+	deps := forward[file]
+	for i, dep := range deps {
+		line += renderDepTree(dep, forward, visited, childPrefix, i == len(deps)-1)
+	}
+	return line
+}
+
+// buildDepTreeView は選択中ファイルの依存ツリー文字列を組み立てる
+func (m *Model) buildDepTreeView() string {
+	if len(m.files) == 0 {
+		return ""
+	}
+	file := m.files[m.cursor]
+	var sb strings.Builder
+
+	sb.WriteString(titleStyle.Render("🌲 Dependencies: "+filepath.Base(file)) + "\n\n")
+
+	// 順方向（このファイルが使うもの）
+	deps := m.depForward[file]
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Render("Uses:") + "\n")
+	if len(deps) == 0 {
+		sb.WriteString("  (none)\n")
+	} else {
+		for i, dep := range deps {
+			visited := map[string]bool{file: true}
+			sb.WriteString(renderDepTree(dep, m.depForward, visited, "  ", i == len(deps)-1))
+		}
+	}
+
+	sb.WriteString("\n")
+
+	// 逆方向（このファイルを使っているもの）
+	usedBy := m.depReverse[file]
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Render("Used by:") + "\n")
+	if len(usedBy) == 0 {
+		sb.WriteString("  (none)\n")
+	} else {
+		for _, f := range usedBy {
+			sb.WriteString("  • " + strings.ReplaceAll(f, "\\", "/") + "\n")
+		}
+	}
+
+	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(Esc / t: 閉じる)"))
+	return sb.String()
 }
 
 func (m *Model) updateViewportContent() tea.Cmd {
@@ -205,6 +279,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// --- 依存ツリー表示モードの処理 ---
+		if m.state == stateDepTree {
+			switch msg.String() {
+			case "esc", "q", "t":
+				m.state = stateList
+			}
+			return m, nil
+		}
+
 		// --- 編集する行を上下キーで選ぶモードの処理 ---
 		if m.state == stateEditLineList {
 			switch msg.String() {
@@ -490,8 +573,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					)
 					os.MkdirAll(filepath.Dir(savePath), 0755)
 					os.WriteFile(savePath, []byte(m.generatedYaml), 0644)
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					m.errMsg = "保存しました: " + savePath
 				}
 				m.state = stateList
@@ -533,8 +615,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									func() error { return os.WriteFile(capturedDest, capturedContent, 0644) },
 								)
 								m.errMsg = "✨ 複製しました: " + destFile
-								m.files, _ = config.LoadYamlFiles(m.confDir)
-								m.allFiles = m.files
+								m.reloadFiles()
 							} else {
 								m.errMsg = "書き込みエラー: " + err.Error()
 							}
@@ -568,8 +649,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.errMsg = "削除エラー: " + err.Error()
 				} else {
 					m.errMsg = "🗑 削除しました: " + targetFile
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					if m.cursor >= len(m.files) {
 						m.cursor = max(0, len(m.files)-1)
 					}
@@ -648,8 +728,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.errMsg = "Undoエラー: " + err.Error()
 				} else {
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					m.cursor = snap.cursor
 					if m.cursor >= len(m.files) {
 						m.cursor = max(0, len(m.files)-1)
@@ -663,8 +742,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.errMsg = "Redoエラー: " + err.Error()
 				} else {
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					m.cursor = snap.cursor
 					if m.cursor >= len(m.files) {
 						m.cursor = max(0, len(m.files)-1)
@@ -728,6 +806,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errMsg = ""
 				return m, textinput.Blink
 			}
+		case "t":
+			if len(m.files) > 0 {
+				m.state = stateDepTree
+				m.errMsg = ""
+			}
+			return m, nil
 		case "d":
 			if len(m.files) > 0 {
 				m.state = stateDeleteConfirm
@@ -893,7 +977,7 @@ func (m Model) View() string {
 			listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(y: 削除 / n, Esc: キャンセル)")
 		}
 	} else if m.state == stateList {
-		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'c'で複製, 'e'で編集, 'd'で削除)") + "\n\n"
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'c'で複製, 'e'で編集, 'd'で削除, 't'で依存ツリー)") + "\n\n"
 	}
 
 	if m.errMsg != "" {
@@ -920,6 +1004,8 @@ func (m Model) View() string {
 		}
 		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 行選択, Enter: 編集/保存, Esc: 終了)"))
 		rightPaneContent = sb.String()
+	} else if m.state == stateDepTree {
+		rightPaneContent = m.buildDepTreeView()
 	} else {
 		var selectedFile string
 		if len(m.files) > 0 {
