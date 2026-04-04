@@ -37,7 +37,6 @@ const (
 	statePyFileSearch                      // Pythonファイルを選んでYAMLを生成するモード
 	statePyClassSelect                     // Pythonファイル内のクラスを選ぶモード
 	stateSavePath                          // 生成YAMLの保存先を確認・編集するモード
-	stateDepTree                           // 依存関係ツリー表示モード
 )
 
 // --- モデルの定義 ---
@@ -137,17 +136,16 @@ func renderDepTree(file string, forward map[string][]string, visited map[string]
 	return line
 }
 
-// buildDepTreeView は選択中ファイルの依存ツリー文字列を組み立てる
-func (m *Model) buildDepTreeView() string {
+// buildDepPaneContent は左下ペインに常時表示する依存情報を組み立てる
+func (m *Model) buildDepPaneContent() string {
 	if len(m.files) == 0 {
 		return ""
 	}
 	file := m.files[m.cursor]
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("🌲 Dependencies: "+filepath.Base(file)) + "\n\n")
+	sb.WriteString(titleStyle.Render("🌲 Dependencies") + "\n")
 
-	// 順方向（このファイルが使うもの）
 	deps := m.depForward[file]
 	sb.WriteString(lipgloss.NewStyle().Bold(true).Render("Uses:") + "\n")
 	if len(deps) == 0 {
@@ -161,7 +159,6 @@ func (m *Model) buildDepTreeView() string {
 
 	sb.WriteString("\n")
 
-	// 逆方向（このファイルを使っているもの）
 	usedBy := m.depReverse[file]
 	sb.WriteString(lipgloss.NewStyle().Bold(true).Render("Used by:") + "\n")
 	if len(usedBy) == 0 {
@@ -172,7 +169,6 @@ func (m *Model) buildDepTreeView() string {
 		}
 	}
 
-	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(Esc / t: 閉じる)"))
 	return sb.String()
 }
 
@@ -279,15 +275,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// --- 依存ツリー表示モードの処理 ---
-		if m.state == stateDepTree {
-			switch msg.String() {
-			case "esc", "q", "t":
-				m.state = stateList
-			}
-			return m, nil
-		}
-
 		// --- 編集する行を上下キーで選ぶモードの処理 ---
 		if m.state == stateEditLineList {
 			switch msg.String() {
@@ -806,12 +793,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errMsg = ""
 				return m, textinput.Blink
 			}
-		case "t":
-			if len(m.files) > 0 {
-				m.state = stateDepTree
-				m.errMsg = ""
-			}
-			return m, nil
 		case "d":
 			if len(m.files) > 0 {
 				m.state = stateDeleteConfirm
@@ -977,7 +958,7 @@ func (m Model) View() string {
 			listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(y: 削除 / n, Esc: キャンセル)")
 		}
 	} else if m.state == stateList {
-		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'c'で複製, 'e'で編集, 'd'で削除, 't'で依存ツリー)") + "\n\n"
+		listStr += lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("('/'で検索, 'n'で新規生成, 'a'で埋め込み, 'c'で複製, 'e'で編集, 'd'で削除)") + "\n\n"
 	}
 
 	if m.errMsg != "" {
@@ -1004,8 +985,6 @@ func (m Model) View() string {
 		}
 		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("(↑/↓: 行選択, Enter: 編集/保存, Esc: 終了)"))
 		rightPaneContent = sb.String()
-	} else if m.state == stateDepTree {
-		rightPaneContent = m.buildDepTreeView()
 	} else {
 		var selectedFile string
 		if len(m.files) > 0 {
@@ -1035,8 +1014,20 @@ func (m Model) View() string {
 		return strings.Join(lines, "\n")
 	}
 
-	leftPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(clamp(listStr, paneHeight))
+	// 左カラムを上下に分割: ファイルリスト(上) + 依存ツリー(下)
+	// 2つのペインを縦に並べると border+padding が各4行分かかるので合計8行引く
+	totalLeftInner := m.height - 8
+	depInnerHeight := totalLeftInner * 2 / 5
+	if depInnerHeight < 6 {
+		depInnerHeight = 6
+	}
+	filesInnerHeight := totalLeftInner - depInnerHeight
+
+	filePane := paneStyle.Width(paneWidth).Height(filesInnerHeight).Render(clamp(listStr, filesInnerHeight))
+	depPane := paneStyle.Width(paneWidth).Height(depInnerHeight).Render(clamp(m.buildDepPaneContent(), depInnerHeight))
+	leftColumn := lipgloss.JoinVertical(lipgloss.Left, filePane, depPane)
+
 	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(clamp(rightPaneContent, paneHeight))
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightPane)
 }
