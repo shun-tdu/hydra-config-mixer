@@ -972,7 +972,28 @@ func (m Model) View() string {
 		var sb strings.Builder
 		sb.WriteString(titleStyle.Render("✏️ Inline Edit: "+filepath.Base(m.editFile)) + "\n\n")
 
-		for i, line := range m.editLines {
+		// タイトル(2行) + 空白(2行) + フッター(2行) を除いた行数がコンテンツ領域
+		contentHeight := paneHeight - 6
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+
+		// editCursor が常に中央付近に来るようにウィンドウをスライドさせる
+		start := m.editCursor - contentHeight/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + contentHeight
+		if end > len(m.editLines) {
+			end = len(m.editLines)
+			start = end - contentHeight
+			if start < 0 {
+				start = 0
+			}
+		}
+
+		for i := start; i < end; i++ {
+			line := m.editLines[i]
 			if i == m.editCursor {
 				if m.state == stateEditLineValue {
 					sb.WriteString(selectedItemStyle.Render(">> "+m.editLinePrefix+" ") + m.textInput.View() + "\n")
@@ -1014,20 +1035,36 @@ func (m Model) View() string {
 		return strings.Join(lines, "\n")
 	}
 
-	// 左カラムを上下に分割: ファイルリスト(上) + 依存ツリー(下)
-	// 2つのペインを縦に並べると border+padding が各4行分かかるので合計8行引く
-	totalLeftInner := m.height - 8
-	depInnerHeight := totalLeftInner * 2 / 5
-	if depInnerHeight < 6 {
-		depInnerHeight = 6
+	// 左ペインを1つのペイン内でセパレーターで区切る
+	// ファイルリスト: 上60% / 依存ツリー: 下40%
+	depSectionHeight := paneHeight * 2 / 5
+	if depSectionHeight < 6 {
+		depSectionHeight = 6
 	}
-	filesInnerHeight := totalLeftInner - depInnerHeight
+	filesSectionHeight := paneHeight - depSectionHeight - 1 // -1はセパレーター行
 
-	filePane := paneStyle.Width(paneWidth).Height(filesInnerHeight).Render(clamp(listStr, filesInnerHeight))
-	depPane := paneStyle.Width(paneWidth).Height(depInnerHeight).Render(clamp(m.buildDepPaneContent(), depInnerHeight))
-	leftColumn := lipgloss.JoinVertical(lipgloss.Left, filePane, depPane)
+	separator := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("62")).
+		Render(strings.Repeat("─", paneWidth-4))
 
-	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(clamp(rightPaneContent, paneHeight))
+	leftContent := clamp(listStr, filesSectionHeight) + "\n" +
+		separator + "\n" +
+		clamp(m.buildDepPaneContent(), depSectionHeight)
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightPane)
+	// .Height() に頼らず両ペインを明示的に paneHeight 行にそろえる
+	pad := func(s string, h int) string {
+		lines := strings.Split(s, "\n")
+		if len(lines) > h {
+			lines = lines[:h]
+		}
+		for len(lines) < h {
+			lines = append(lines, "")
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	leftPane := paneStyle.Width(paneWidth).Render(pad(leftContent, paneHeight))
+	rightPane := paneStyle.Width(paneWidth).Render(pad(clamp(rightPaneContent, paneHeight), paneHeight))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 }
