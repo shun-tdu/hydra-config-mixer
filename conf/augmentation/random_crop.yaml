@@ -1,0 +1,3 @@
+_target_: src.models.rnn.RandomCropAugmentation
+crop_ratio: 0.8
+min_length: 16

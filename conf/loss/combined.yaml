@@ -1,0 +1,7 @@
+defaults:
+  - loss/reconstruction
+  - loss/kl_divergence
+
+_target_: src.models.vae.CombinedLoss
+recon_weight: 1.0
+kl_weight: 0.5

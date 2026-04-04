@@ -76,6 +76,10 @@ type Model struct {
 	// ディレクトリ設定
 	confDir string
 
+	// 依存グラフ
+	depForward map[string][]string // ファイル → 依存先
+	depReverse map[string][]string // ファイル → 被依存元
+
 	// Modelの履歴
 	history History
 }
@@ -86,20 +90,86 @@ func New(files []string, confDir string) Model {
 	ti.CharLimit = 156
 	ti.Width = 40
 
+	fwd, rev := config.BuildDepGraph(files, confDir)
 	m := Model{
-		files:     files,
-		allFiles:  files,
-		textInput: ti,
-		state:     stateList,
-		confDir:   confDir,
+		files:      files,
+		allFiles:   files,
+		textInput:  ti,
+		state:      stateList,
+		confDir:    confDir,
+		depForward: fwd,
+		depReverse: rev,
 	}
 
 	m.history.Save(m, nil, nil) // 初期状態を保存
 	return m
 }
 
+func (m *Model) reloadFiles() {
+	m.files, _ = config.LoadYamlFiles(m.confDir)
+	m.allFiles = m.files
+	m.depForward, m.depReverse = config.BuildDepGraph(m.files, m.confDir)
+}
+
 func (m Model) Init() tea.Cmd {
 	return nil
+}
+
+// renderDepTree はファイルを起点とした依存ツリーをASCIIアートで返す（循環参照をvisitedで防止）
+func renderDepTree(file string, forward map[string][]string, visited map[string]bool, prefix string, isLast bool) string {
+	connector := "├── "
+	childPrefix := prefix + "│   "
+	if isLast {
+		connector = "└── "
+		childPrefix = prefix + "    "
+	}
+	line := prefix + connector + filepath.Base(file) + "\n"
+
+	if visited[file] {
+		return line
+	}
+	visited[file] = true
+	deps := forward[file]
+	for i, dep := range deps {
+		line += renderDepTree(dep, forward, visited, childPrefix, i == len(deps)-1)
+	}
+	return line
+}
+
+// buildDepPaneContent は左下ペインに常時表示する依存情報を組み立てる
+func (m *Model) buildDepPaneContent() string {
+	if len(m.files) == 0 {
+		return ""
+	}
+	file := m.files[m.cursor]
+	var sb strings.Builder
+
+	sb.WriteString(titleStyle.Render("🌲 Dependencies") + "\n")
+
+	deps := m.depForward[file]
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Render("Uses:") + "\n")
+	if len(deps) == 0 {
+		sb.WriteString("  (none)\n")
+	} else {
+		for i, dep := range deps {
+			visited := map[string]bool{file: true}
+			sb.WriteString(renderDepTree(dep, m.depForward, visited, "  ", i == len(deps)-1))
+		}
+	}
+
+	sb.WriteString("\n")
+
+	usedBy := m.depReverse[file]
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Render("Used by:") + "\n")
+	if len(usedBy) == 0 {
+		sb.WriteString("  (none)\n")
+	} else {
+		for _, f := range usedBy {
+			sb.WriteString("  • " + strings.ReplaceAll(f, "\\", "/") + "\n")
+		}
+	}
+
+	return sb.String()
 }
 
 func (m *Model) updateViewportContent() tea.Cmd {
@@ -490,8 +560,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					)
 					os.MkdirAll(filepath.Dir(savePath), 0755)
 					os.WriteFile(savePath, []byte(m.generatedYaml), 0644)
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					m.errMsg = "保存しました: " + savePath
 				}
 				m.state = stateList
@@ -533,8 +602,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									func() error { return os.WriteFile(capturedDest, capturedContent, 0644) },
 								)
 								m.errMsg = "✨ 複製しました: " + destFile
-								m.files, _ = config.LoadYamlFiles(m.confDir)
-								m.allFiles = m.files
+								m.reloadFiles()
 							} else {
 								m.errMsg = "書き込みエラー: " + err.Error()
 							}
@@ -568,8 +636,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.errMsg = "削除エラー: " + err.Error()
 				} else {
 					m.errMsg = "🗑 削除しました: " + targetFile
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					if m.cursor >= len(m.files) {
 						m.cursor = max(0, len(m.files)-1)
 					}
@@ -648,8 +715,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.errMsg = "Undoエラー: " + err.Error()
 				} else {
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					m.cursor = snap.cursor
 					if m.cursor >= len(m.files) {
 						m.cursor = max(0, len(m.files)-1)
@@ -663,8 +729,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.errMsg = "Redoエラー: " + err.Error()
 				} else {
-					m.files, _ = config.LoadYamlFiles(m.confDir)
-					m.allFiles = m.files
+					m.reloadFiles()
 					m.cursor = snap.cursor
 					if m.cursor >= len(m.files) {
 						m.cursor = max(0, len(m.files)-1)
@@ -907,7 +972,28 @@ func (m Model) View() string {
 		var sb strings.Builder
 		sb.WriteString(titleStyle.Render("✏️ Inline Edit: "+filepath.Base(m.editFile)) + "\n\n")
 
-		for i, line := range m.editLines {
+		// タイトル(2行) + 空白(2行) + フッター(2行) を除いた行数がコンテンツ領域
+		contentHeight := paneHeight - 6
+		if contentHeight < 1 {
+			contentHeight = 1
+		}
+
+		// editCursor が常に中央付近に来るようにウィンドウをスライドさせる
+		start := m.editCursor - contentHeight/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + contentHeight
+		if end > len(m.editLines) {
+			end = len(m.editLines)
+			start = end - contentHeight
+			if start < 0 {
+				start = 0
+			}
+		}
+
+		for i := start; i < end; i++ {
+			line := m.editLines[i]
 			if i == m.editCursor {
 				if m.state == stateEditLineValue {
 					sb.WriteString(selectedItemStyle.Render(">> "+m.editLinePrefix+" ") + m.textInput.View() + "\n")
@@ -949,8 +1035,36 @@ func (m Model) View() string {
 		return strings.Join(lines, "\n")
 	}
 
-	leftPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(clamp(listStr, paneHeight))
-	rightPane := paneStyle.Width(paneWidth).Height(paneHeight).Render(clamp(rightPaneContent, paneHeight))
+	// 左ペインを1つのペイン内でセパレーターで区切る
+	// ファイルリスト: 上60% / 依存ツリー: 下40%
+	depSectionHeight := paneHeight * 2 / 5
+	if depSectionHeight < 6 {
+		depSectionHeight = 6
+	}
+	filesSectionHeight := paneHeight - depSectionHeight - 1 // -1はセパレーター行
+
+	separator := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("62")).
+		Render(strings.Repeat("─", paneWidth-4))
+
+	leftContent := clamp(listStr, filesSectionHeight) + "\n" +
+		separator + "\n" +
+		clamp(m.buildDepPaneContent(), depSectionHeight)
+
+	// .Height() に頼らず両ペインを明示的に paneHeight 行にそろえる
+	pad := func(s string, h int) string {
+		lines := strings.Split(s, "\n")
+		if len(lines) > h {
+			lines = lines[:h]
+		}
+		for len(lines) < h {
+			lines = append(lines, "")
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	leftPane := paneStyle.Width(paneWidth).Render(pad(leftContent, paneHeight))
+	rightPane := paneStyle.Width(paneWidth).Render(pad(clamp(rightPaneContent, paneHeight), paneHeight))
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 }

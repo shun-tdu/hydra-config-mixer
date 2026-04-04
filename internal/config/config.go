@@ -81,6 +81,78 @@ func LoadPyClasses(filePath string) []string {
 	return classes
 }
 
+// ParseDefaults はYAMLファイルの defaults: ブロックを解析し、依存するファイルパスのリストを返す
+func ParseDefaults(filePath string, confDir string) []string {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.Split(string(content), "\n")
+	inDefaults := false
+	var deps []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "defaults:") {
+			inDefaults = true
+			continue
+		}
+
+		if inDefaults {
+			if len(trimmed) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, "-") {
+				break
+			}
+			if !strings.HasPrefix(trimmed, "-") {
+				continue
+			}
+
+			entry := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+			// "_self_" はHydra組み込みなのでスキップ
+			if entry == "_self_" {
+				continue
+			}
+
+			var depPath string
+			if strings.Contains(entry, ":") {
+				// "group: name" 形式
+				parts := strings.SplitN(entry, ":", 2)
+				group := strings.TrimSpace(parts[0])
+				name := strings.TrimSpace(parts[1])
+				depPath = filepath.Join(confDir, group, name+".yaml")
+			} else {
+				// "path/name" 形式
+				depPath = filepath.Join(confDir, filepath.FromSlash(entry)+".yaml")
+			}
+
+			if _, err := os.Stat(depPath); err == nil {
+				deps = append(deps, depPath)
+			}
+		}
+	}
+
+	return deps
+}
+
+// BuildDepGraph は全YAMLファイルの依存グラフを構築する。
+// 戻り値は forward（ファイル→依存先）と reverse（ファイル→被依存元）の2つのマップ。
+func BuildDepGraph(files []string, confDir string) (forward, reverse map[string][]string) {
+	forward = make(map[string][]string)
+	reverse = make(map[string][]string)
+	for _, f := range files {
+		forward[f] = nil
+	}
+	for _, f := range files {
+		deps := ParseDefaults(f, confDir)
+		forward[f] = deps
+		for _, dep := range deps {
+			reverse[dep] = append(reverse[dep], f)
+		}
+	}
+	return forward, reverse
+}
+
 func EmbedConfigToYaml(targetFile string, embedPath string) error {
 	parts := strings.Split(embedPath, "/")
 

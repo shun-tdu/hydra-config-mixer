@@ -1,0 +1,14 @@
+defaults:
+  - models/encoder
+  - models/decoder
+  - models/diffusion_model
+  - optimizer: adamw
+  - scheduler: cosine
+  - loss: combined
+  - dataloader: motion_capture
+
+experiment_name: full_pipeline_v1
+seed: 42
+max_epochs: 200
+grad_clip: 1.0
+mixed_precision: true
