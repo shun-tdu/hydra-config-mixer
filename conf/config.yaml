@@ -1,7 +1,7 @@
 defaults:
   - model: transformer
+  - loss: combined
   - optimizer: sgd
-
 experiment_name: "motion_style_separation_001"
 batch_size: 32
 max_epochs: 100

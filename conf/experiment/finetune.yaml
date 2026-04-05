@@ -1,0 +1,5 @@
+defaults:
+  - train/large
+
+learning_rate: 0.00001
+batch_size: 64

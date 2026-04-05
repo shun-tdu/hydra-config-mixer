@@ -209,6 +209,98 @@ func WriteDefaultsEntries(filePath string, entries []string) error {
 	return os.WriteFile(filePath, []byte(strings.Join(newLines, "\n")), 0644)
 }
 
+// KeySource はあるキーがどのファイルで定義されているかを表す
+type KeySource struct {
+	File  string
+	Value string
+}
+
+// CollectKeys はYAMLファイルからトップレベルの key: value を収集する（defaults・_target_ は除外）
+func CollectKeys(filePath string) map[string]string {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]string)
+	inDefaults := false
+
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "defaults:") {
+			inDefaults = true
+			continue
+		}
+		if inDefaults {
+			if len(trimmed) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, "-") {
+				inDefaults = false
+			} else {
+				continue
+			}
+		}
+
+		// トップレベル（インデントなし）の key: value のみ対象
+		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if key == "" || key == "_target_" {
+			continue
+		}
+		result[key] = val
+	}
+	return result
+}
+
+// ConflictInfo は競合しているキーの情報を表す
+type ConflictInfo struct {
+	Key     string
+	Sources []KeySource // マージ順（先頭が最初に読まれる＝優先度低）
+}
+
+// FindConflicts は filePath の defaults: を再帰的に展開し、競合しているキーを返す。
+// Hydraのマージ順（DFS後順: 依存先が先にマージ → 後のものが優先）で収集する。
+func FindConflicts(filePath string, forward map[string][]string) []ConflictInfo {
+	var ordered []string
+	visited := map[string]bool{}
+
+	var dfs func(f string)
+	dfs = func(f string) {
+		if visited[f] {
+			return
+		}
+		visited[f] = true
+		for _, dep := range forward[f] {
+			dfs(dep)
+		}
+		ordered = append(ordered, f)
+	}
+	dfs(filePath)
+
+	// キーごとに定義元を収集
+	keyMap := map[string][]KeySource{}
+	for _, f := range ordered {
+		keys := CollectKeys(f)
+		for k, v := range keys {
+			keyMap[k] = append(keyMap[k], KeySource{File: f, Value: v})
+		}
+	}
+
+	// 2つ以上のファイルで定義されているキーを競合として返す
+	var conflicts []ConflictInfo
+	for key, sources := range keyMap {
+		if len(sources) > 1 {
+			conflicts = append(conflicts, ConflictInfo{Key: key, Sources: sources})
+		}
+	}
+	return conflicts
+}
+
 // BuildDepGraph は全YAMLファイルの依存グラフを構築する。
 // 戻り値は forward（ファイル→依存先）と reverse（ファイル→被依存元）の2つのマップ。
 func BuildDepGraph(files []string, confDir string) (forward, reverse map[string][]string) {

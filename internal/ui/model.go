@@ -170,6 +170,37 @@ func (m *Model) buildDepPaneContent() string {
 		}
 	}
 
+	// 競合キーの表示
+	conflicts := config.FindConflicts(file, m.depForward)
+	if len(conflicts) > 0 {
+		sb.WriteString("\n")
+		conflictStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+		winnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+		loserStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Strikethrough(true)
+		sb.WriteString(conflictStyle.Render("⚠ Key Conflicts:") + "\n")
+		for _, c := range conflicts {
+			sb.WriteString(fmt.Sprintf("  %s\n", lipgloss.NewStyle().Bold(true).Render(c.Key)))
+			for i, src := range c.Sources {
+				base := filepath.Base(src.File)
+				val := src.Value
+				if val == "" {
+					val = "(empty)"
+				}
+				entry := fmt.Sprintf("    %s: %s = %s", func() string {
+					if i == len(c.Sources)-1 {
+						return "✓"
+					}
+					return "✗"
+				}(), base, val)
+				if i == len(c.Sources)-1 {
+					sb.WriteString(winnerStyle.Render(entry) + "\n")
+				} else {
+					sb.WriteString(loserStyle.Render(entry) + "\n")
+				}
+			}
+		}
+	}
+
 	return sb.String()
 }
 
