@@ -13,6 +13,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// PythonPath はPythonインタープリターのパス
+var Python = "python"
+
 //go:embed inspect_helper.py
 var inspectHelperScript []byte
 
@@ -50,7 +53,14 @@ func GenerateYamlFromTarget(target string) (string, error) {
 	}
 	tmp.Close()
 
-	cmd := exec.Command("python", tmp.Name(), target)
+	// PythonPathの存在確認
+	pythonPath, lookErr := getPythonPath()
+	if lookErr != nil {
+		return "", fmt.Errorf("Pythonの実行に失敗: %v", lookErr)
+	}
+
+	// Pythonコマンドの実行確認
+	cmd := exec.Command(pythonPath, tmp.Name(), target)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("Pythonの実行に失敗: %v\n%s", err, string(out))
@@ -85,6 +95,7 @@ func GenerateYamlFromTarget(target string) (string, error) {
 	}
 	return sb.String(), nil
 }
+
 func CheckTargetCmd(filePath string) tea.Cmd {
 	return func() tea.Msg {
 		content, err := os.ReadFile(filePath)
@@ -121,12 +132,33 @@ func CheckTargetCmd(filePath string) tea.Cmd {
 			"    sys.exit(0 if hasattr(m, parts[1]) else 1)\n" +
 			"except Exception:\n" +
 			"    sys.exit(1)\n"
-		cmd := exec.Command("python", "-c", script, target)
-		err = cmd.Run()
+
+		if pythonPath, lookErr := getPythonPath(); lookErr == nil {
+			cmd := exec.Command(pythonPath, "-c", script, target)
+			err = cmd.Run()
+		} else {
+			err = lookErr
+		}
 
 		return TargetCheckMsg{
 			Target: target,
 			Exists: err == nil,
 		}
 	}
+}
+
+// getPythonPathはPythonが存在すれば返す。
+func getPythonPath() (string, error) {
+	if Python != "" {
+		return Python, nil
+	}
+
+	// pythonPath未指定の場合は、python3, pythonの順に探索してフォールバック
+	candidates := []string{"python3", "python"}
+	for _, file := range candidates {
+		if path, err := exec.LookPath(file); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("unable to find python path")
 }

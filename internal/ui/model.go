@@ -41,17 +41,17 @@ const (
 
 // --- モデルの定義 ---
 type Model struct {
-	files              []string // 絞り込みこまれているリスト
-	allFiles           []string // 全てのファイルのマスターリスト
-	cursor             int
-	width              int
-	height             int
-	viewport           viewport.Model
-	textInput          textinput.Model
-	state              sessionState
-	ready              bool
-	errMsg             string
-	filteredFiles      []string
+	files                   []string // 絞り込みこまれているリスト
+	allFiles                []string // 全てのファイルのマスターリスト
+	cursor                  int
+	width                   int
+	height                  int
+	viewport                viewport.Model
+	textInput               textinput.Model
+	state                   sessionState
+	ready                   bool
+	errMsg                  string
+	filteredFiles           []string
 	autoCompleteCursor      int
 	autoCompleteReturnState sessionState // オートコンプリート終了後の戻り先
 	warningMsg              string
