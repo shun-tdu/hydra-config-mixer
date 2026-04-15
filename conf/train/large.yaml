@@ -1,0 +1,5 @@
+defaults:
+  - train/base
+
+batch_size: 256
+dropout: 0.05

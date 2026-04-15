@@ -1,0 +1,7 @@
+defaults:
+  - backbone: resnet
+
+_target_: src.models.encoder.MotionDecoder
+latent_dim: 256
+output_dim: 512
+dropout: 0.1

@@ -1,0 +1,4 @@
+_target_: src.models.encoder.ResNetBackbone
+layers: [3, 4, 6, 3]
+pretrained: true
+freeze_bn: false

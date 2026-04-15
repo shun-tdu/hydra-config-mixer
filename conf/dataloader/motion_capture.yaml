@@ -1,0 +1,8 @@
+defaults:
+  - augmentation: random_crop
+
+_target_: src.models.rnn.MotionCaptureDataLoader
+batch_size: 32
+num_workers: 4
+shuffle: true
+pin_memory: true
